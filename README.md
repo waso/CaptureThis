@@ -26,7 +26,7 @@
 
 ---
 
-CaptureThis is a native macOS screen recording application built for creators who need more than just a screen capture. Record your screen in **4K at 60fps**, overlay your **selfie camera**, generate **real-time subtitles** from your voice, **annotate on-screen** while recording, track every **mouse click** with visual indicators, and edit everything in a built-in **timeline editor** -- all without leaving the app.
+CaptureThis is a native macOS screen recording application built for creators who need more than just a screen capture. Record your screen in **4K at 60fps**, overlay your **selfie camera**, generate **real-time subtitles** from your voice, **annotate on-screen** while recording, track every **mouse click** with intelligent zoom, and edit everything in a built-in **timeline editor** -- all without leaving the app.
 
 Whether you're making tutorials, product demos, bug reports, or presentations, CaptureThis gives you a polished result straight out of the box.
 
@@ -61,9 +61,8 @@ Whether you're making tutorials, product demos, bug reports, or presentations, C
   - **No Zoom** -- Standard recording, no cursor tracking
   - **Zoom on Click** -- Automatically zooms into the area around each mouse click, then zooms back out
   - **Follow Mouse** -- The viewport dynamically follows your cursor with a smooth zoom
-- **Click detection** -- Every left and right mouse click is captured with frame-accurate timestamps
-- **Click animations** -- Clicks are visualized as animated circles in the final video so viewers always know where you clicked
-- **Cursor path rendering** -- Smooth cursor trails are drawn on the exported video for clear visual guidance
+- **Click detection** -- Every left and right mouse click is captured with frame-accurate timestamps and used to drive zoom behavior
+- **Click markers on timeline** -- Click events are displayed on the editor timeline so you can see exactly when clicks occurred
 
 ### On-Screen Drawing
 
@@ -161,7 +160,7 @@ CaptureThis requires the following macOS permissions to function:
 | **Screen Recording** | To capture your display content |
 | **Microphone** | To record your voice and generate real-time subtitles |
 | **Camera** | To capture selfie camera footage for picture-in-picture |
-| **Accessibility** | To detect mouse clicks for click visualization |
+| **Accessibility** | To detect mouse clicks for zoom-on-click tracking |
 | **Speech Recognition** | To transcribe your speech into subtitles |
 
 You will be prompted to grant each permission on first use. You can manage these in **System Settings > Privacy & Security**.
@@ -207,7 +206,7 @@ CaptureThis/
 2. Each frame triggers synchronized **cursor position** and **click event** sampling
 3. **AVAssetWriter** encodes frames to H.264 with separate audio tracks for system audio and microphone
 4. **Speech recognition** runs concurrently, generating timestamped subtitle entries
-5. On stop, **VideoProcessor** composites everything into the final video: click animations, cursor paths, subtitles, selfie overlay, background, and borders
+5. On stop, **VideoProcessor** composites everything into the final video: zoom effects, subtitles, selfie overlay, background, and borders
 
 ## System Requirements
 
