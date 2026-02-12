@@ -1,0 +1,1079 @@
+import Cocoa
+import AVFoundation
+import CoreGraphics
+
+enum TrackingMode: Int {
+    case zoomOnClicks = 0
+    case followCursor = 1
+    case recordWindow = 2
+}
+
+class MainViewController: NSViewController {
+    // UI Elements
+    private var closeButton: NSButton!
+    private var resolutionPopup: NSPopUpButton!
+    private var fpsPopup: NSPopUpButton!
+    private var trackingModePopup: NSPopUpButton!
+    private var leftSeparatorLine: NSView!
+    private var middleSeparatorLine: NSView!
+    private var rightSeparatorLine: NSView!
+    private var separator2: NSView!
+    private var separator3: NSView!
+    private var timerLabel: NSTextField!
+    private var recordButton: NSButton!
+    private var stopButton: NSButton!
+    private var exportButton: NSButton!
+    private var recordLabel: NSTextField!
+    private var stopLabel: NSTextField!
+    private var exportLabel: NSTextField!
+    private var progressIndicator: NSProgressIndicator!
+    private var completionLabel: NSTextField!
+
+    // Recording state
+    private var screenRecorder: ScreenRecorderNew?
+    private var clickTracker: ClickTrackerNew?
+    private var cursorTracker: CursorTrackerNew?
+    private var recordingStartTime: Date?
+    private var timerUpdateTimer: Timer?
+    private var blinkTimer: Timer?
+    private var clickCount: Int = 0
+    private var trackingMode: TrackingMode = .zoomOnClicks
+    private var selectedFPS: Int = 60
+    private var selectedWindowID: CGWindowID?
+    private var selectedWindowName: String?
+    private var isRecording: Bool = false
+    private var hasRecordedVideo: Bool = false
+
+    override func loadView() {
+        // Create draggable main view with dark toolbar background - narrower height
+        let mainView = DraggableView(frame: NSRect(x: 0, y: 0, width: 800, height: 65))
+        mainView.wantsLayer = true
+        mainView.layer?.backgroundColor = NSColor(red: 0.15, green: 0.15, blue: 0.15, alpha: 1.0).cgColor
+        mainView.layer?.cornerRadius = 12
+        self.view = mainView
+    }
+
+    override func viewDidLoad() {
+        super.viewDidLoad()
+        setupUI()
+    }
+
+    private func setupUI() {
+        createContainerView()
+    }
+
+    private func createContainerView() {
+        // Close button (X)
+        closeButton = createIconButton(title: "✕", size: 40)
+        closeButton.target = self
+        closeButton.action = #selector(closeWindow)
+        view.addSubview(closeButton)
+
+        // Resolution popup - full height button
+        resolutionPopup = NSPopUpButton(frame: .zero, pullsDown: false)
+        resolutionPopup.addItems(withTitles: ["4K", "1440p", "1080p", "Native"])
+        resolutionPopup.selectItem(at: 0)  // Select 4K by default
+        resolutionPopup.wantsLayer = true
+        resolutionPopup.layer?.backgroundColor = NSColor(red: 0.15, green: 0.15, blue: 0.15, alpha: 1.0).cgColor
+        resolutionPopup.layer?.cornerRadius = 0
+        resolutionPopup.bezelStyle = .rounded
+        resolutionPopup.isBordered = false
+
+        // Set large font for the button
+        resolutionPopup.font = NSFont.systemFont(ofSize: 20, weight: .medium)
+
+        // Style the button cell
+        if let cell = resolutionPopup.cell as? NSButtonCell {
+            cell.alignment = .center  // Center the button content
+        }
+
+        // Set light gray arrow color
+        if let cell = resolutionPopup.cell as? NSPopUpButtonCell {
+            cell.arrowPosition = .arrowAtBottom
+        }
+        resolutionPopup.contentTintColor = NSColor(white: 0.7, alpha: 1.0)
+
+        // Style menu items with dark background
+        if let menu = resolutionPopup.menu {
+            menu.font = NSFont.systemFont(ofSize: 16, weight: .regular)
+
+            // Set menu appearance to dark
+            menu.appearance = NSAppearance(named: .darkAqua)
+
+            for item in menu.items {
+                let title = item.title
+                let attributedTitle = NSMutableAttributedString(string: title)
+                attributedTitle.addAttributes([
+                    .foregroundColor: NSColor.white,
+                    .font: NSFont.systemFont(ofSize: 16, weight: .regular)
+                ], range: NSRange(location: 0, length: title.count))
+                item.attributedTitle = attributedTitle
+            }
+        }
+
+        view.addSubview(resolutionPopup)
+
+        // Left separator line (before resolution dropdown)
+        leftSeparatorLine = NSView()
+        leftSeparatorLine.wantsLayer = true
+        leftSeparatorLine.layer?.backgroundColor = NSColor(white: 0.3, alpha: 0.5).cgColor
+        view.addSubview(leftSeparatorLine)
+
+        // Separator 2 (between resolution and FPS)
+        separator2 = NSView()
+        separator2.wantsLayer = true
+        separator2.layer?.backgroundColor = NSColor(white: 0.3, alpha: 0.5).cgColor
+        view.addSubview(separator2)
+
+        // FPS popup - full height button
+        fpsPopup = NSPopUpButton(frame: .zero, pullsDown: false)
+        fpsPopup.addItems(withTitles: ["60 FPS", "30 FPS", "24 FPS"])
+        fpsPopup.selectItem(at: 0)  // Select 60 FPS by default
+        fpsPopup.wantsLayer = true
+        fpsPopup.layer?.backgroundColor = NSColor(red: 0.15, green: 0.15, blue: 0.15, alpha: 1.0).cgColor
+        fpsPopup.layer?.cornerRadius = 0
+        fpsPopup.bezelStyle = .rounded
+        fpsPopup.isBordered = false
+        fpsPopup.target = self
+        fpsPopup.action = #selector(fpsChanged)
+
+        // Set large font for the button
+        fpsPopup.font = NSFont.systemFont(ofSize: 20, weight: .medium)
+
+        // Style the FPS button cell
+        if let cell = fpsPopup.cell as? NSButtonCell {
+            cell.alignment = .center
+        }
+
+        // Set light gray arrow color
+        if let cell = fpsPopup.cell as? NSPopUpButtonCell {
+            cell.arrowPosition = .arrowAtBottom
+        }
+        fpsPopup.contentTintColor = NSColor(white: 0.7, alpha: 1.0)
+
+        // Style FPS menu items with dark background
+        if let menu = fpsPopup.menu {
+            menu.font = NSFont.systemFont(ofSize: 16, weight: .regular)
+
+            // Set menu appearance to dark
+            menu.appearance = NSAppearance(named: .darkAqua)
+
+            for item in menu.items {
+                let title = item.title
+                let attributedTitle = NSMutableAttributedString(string: title)
+                attributedTitle.addAttributes([
+                    .foregroundColor: NSColor.white,
+                    .font: NSFont.systemFont(ofSize: 16, weight: .regular)
+                ], range: NSRange(location: 0, length: title.count))
+                item.attributedTitle = attributedTitle
+            }
+        }
+
+        view.addSubview(fpsPopup)
+
+        // Separator 3 (between FPS and tracking mode)
+        separator3 = NSView()
+        separator3.wantsLayer = true
+        separator3.layer?.backgroundColor = NSColor(white: 0.3, alpha: 0.5).cgColor
+        view.addSubview(separator3)
+
+        // Middle separator line (between dropdowns)
+        middleSeparatorLine = NSView()
+        middleSeparatorLine.wantsLayer = true
+        middleSeparatorLine.layer?.backgroundColor = NSColor(white: 0.3, alpha: 0.5).cgColor
+        view.addSubview(middleSeparatorLine)
+
+        // Tracking mode popup - full height button
+        trackingModePopup = NSPopUpButton(frame: .zero, pullsDown: false)
+        trackingModePopup.addItems(withTitles: ["Zoom on Clicks", "Follow Cursor", "Record Window"])
+        trackingModePopup.selectItem(at: 0)
+        trackingModePopup.wantsLayer = true
+        trackingModePopup.layer?.backgroundColor = NSColor(red: 0.15, green: 0.15, blue: 0.15, alpha: 1.0).cgColor
+        trackingModePopup.layer?.cornerRadius = 0
+        trackingModePopup.bezelStyle = .rounded
+        trackingModePopup.isBordered = false
+        trackingModePopup.target = self
+        trackingModePopup.action = #selector(trackingModeChanged)
+
+        // Set large font for the button
+        trackingModePopup.font = NSFont.systemFont(ofSize: 20, weight: .medium)
+
+        // Style the button cell
+        if let cell = trackingModePopup.cell as? NSButtonCell {
+            cell.alignment = .center  // Center the button content
+        }
+
+        // Set light gray arrow color
+        if let cell = trackingModePopup.cell as? NSPopUpButtonCell {
+            cell.arrowPosition = .arrowAtBottom
+        }
+        trackingModePopup.contentTintColor = NSColor(white: 0.7, alpha: 1.0)
+
+        // Style menu items with dark background
+        if let menu = trackingModePopup.menu {
+            menu.font = NSFont.systemFont(ofSize: 16, weight: .regular)
+
+            // Set menu appearance to dark
+            menu.appearance = NSAppearance(named: .darkAqua)
+
+            for item in menu.items {
+                let title = item.title
+                let attributedTitle = NSMutableAttributedString(string: title)
+                attributedTitle.addAttributes([
+                    .foregroundColor: NSColor.white,
+                    .font: NSFont.systemFont(ofSize: 16, weight: .regular)
+                ], range: NSRange(location: 0, length: title.count))
+                item.attributedTitle = attributedTitle
+            }
+        }
+
+        view.addSubview(trackingModePopup)
+
+        // Right separator line (after tracking mode dropdown)
+        rightSeparatorLine = NSView()
+        rightSeparatorLine.wantsLayer = true
+        rightSeparatorLine.layer?.backgroundColor = NSColor(white: 0.3, alpha: 0.5).cgColor
+        view.addSubview(rightSeparatorLine)
+
+        // Timer label (always visible, starts at 00:00)
+        timerLabel = createLabel(text: "00:00", fontSize: 16, weight: .medium, color: .white)
+        timerLabel.alignment = .center
+        timerLabel.font = NSFont.monospacedSystemFont(ofSize: 16, weight: .medium)
+        view.addSubview(timerLabel)
+
+        // Record button (red circle with white border)
+        recordButton = NSButton()
+        recordButton.title = ""
+        recordButton.isBordered = false
+        recordButton.wantsLayer = true
+        recordButton.layer?.backgroundColor = NSColor(red: 0.95, green: 0.27, blue: 0.23, alpha: 1.0).cgColor
+        recordButton.layer?.cornerRadius = 20  // Circle (40/2)
+        recordButton.layer?.borderWidth = 2
+        recordButton.layer?.borderColor = NSColor.white.cgColor
+        recordButton.target = self
+        recordButton.action = #selector(startRecording)
+        view.addSubview(recordButton)
+
+        // Stop button (green square, no icon, always enabled, never changes color)
+        stopButton = NSButton()
+        stopButton.title = ""
+        stopButton.isBordered = false
+        stopButton.wantsLayer = true
+        stopButton.layer?.backgroundColor = NSColor(red: 0.2, green: 0.8, blue: 0.3, alpha: 1.0).cgColor
+        stopButton.layer?.cornerRadius = 5
+        stopButton.layer?.borderWidth = 2
+        stopButton.layer?.borderColor = NSColor.white.cgColor
+        stopButton.target = self
+        stopButton.action = #selector(stopRecording)
+        view.addSubview(stopButton)
+
+        // Export button (transparent/no background with download icon, always enabled, never changes color)
+        exportButton = NSButton()
+        exportButton.title = ""
+        exportButton.isBordered = false
+        exportButton.wantsLayer = true
+        exportButton.layer?.backgroundColor = NSColor.clear.cgColor
+        exportButton.layer?.cornerRadius = 5
+        exportButton.layer?.borderWidth = 2
+        exportButton.layer?.borderColor = NSColor.white.cgColor
+        exportButton.target = self
+        exportButton.action = #selector(exportVideo)
+        view.addSubview(exportButton)
+
+        // Draw the download icon directly on the layer after layout
+        DispatchQueue.main.async { [weak self] in
+            self?.drawDownloadIcon()
+        }
+
+        // Labels under buttons (hidden)
+        recordLabel = createLabel(text: "", fontSize: 9, weight: .regular, color: NSColor(white: 0.7, alpha: 1.0))
+        recordLabel.isHidden = true
+        view.addSubview(recordLabel)
+
+        stopLabel = createLabel(text: "", fontSize: 9, weight: .regular, color: NSColor(white: 0.7, alpha: 1.0))
+        stopLabel.isHidden = true
+        view.addSubview(stopLabel)
+
+        exportLabel = createLabel(text: "", fontSize: 9, weight: .regular, color: NSColor(white: 0.7, alpha: 1.0))
+        exportLabel.isHidden = true
+        view.addSubview(exportLabel)
+
+        // Progress bar (hidden by default) - next to timer during export
+        progressIndicator = NSProgressIndicator()
+        progressIndicator.style = .bar
+        progressIndicator.isIndeterminate = false
+        progressIndicator.minValue = 0
+        progressIndicator.maxValue = 100
+        progressIndicator.doubleValue = 0
+        progressIndicator.controlSize = .small
+        progressIndicator.isHidden = true
+
+        // Style the progress bar with distinct colors
+        progressIndicator.wantsLayer = true
+        progressIndicator.layer?.backgroundColor = NSColor(white: 0.3, alpha: 1.0).cgColor  // Dark gray background
+        progressIndicator.layer?.cornerRadius = 4
+        view.addSubview(progressIndicator)
+
+        // Completion label (shown after export completes)
+        completionLabel = createLabel(text: "✓ Completed", fontSize: 13, weight: .semibold, color: NSColor.systemGreen)
+        completionLabel.isHidden = true
+        view.addSubview(completionLabel)
+
+        // Layout constraints
+        layoutViews()
+    }
+
+    @objc private func closeWindow() {
+        NSApplication.shared.terminate(nil)
+    }
+
+    @objc private func trackingModeChanged() {
+        let newMode = TrackingMode(rawValue: trackingModePopup.indexOfSelectedItem) ?? .zoomOnClicks
+
+        // If "Record Window" is selected, show window selection dialog
+        if newMode == .recordWindow {
+            showWindowSelectionDialog { [weak self] windowID, windowName in
+                guard let self = self, let windowID = windowID else {
+                    // User cancelled - revert to previous mode
+                    self?.trackingModePopup.selectItem(at: self?.trackingMode.rawValue ?? 0)
+                    return
+                }
+
+                self.selectedWindowID = windowID
+                self.selectedWindowName = windowName
+                self.trackingMode = newMode
+                print("Selected window: \(windowName ?? "Unknown") (ID: \(windowID))")
+            }
+        } else {
+            // Clear window selection for other modes
+            selectedWindowID = nil
+            selectedWindowName = nil
+            trackingMode = newMode
+        }
+    }
+
+    @objc private func fpsChanged() {
+        let fpsValues = [60, 30, 24]
+        selectedFPS = fpsValues[fpsPopup.indexOfSelectedItem]
+    }
+
+    private func layoutViews() {
+        [closeButton, leftSeparatorLine, resolutionPopup, separator2, fpsPopup, separator3, middleSeparatorLine, trackingModePopup, rightSeparatorLine, timerLabel, recordButton, stopButton, exportButton, recordLabel, stopLabel, exportLabel, progressIndicator, completionLabel].forEach {
+            $0?.translatesAutoresizingMaskIntoConstraints = false
+        }
+
+        NSLayoutConstraint.activate([
+            // Close button (left side)
+            closeButton.leadingAnchor.constraint(equalTo: view.leadingAnchor, constant: 12),
+            closeButton.centerYAnchor.constraint(equalTo: view.centerYAnchor),
+            closeButton.widthAnchor.constraint(equalToConstant: 40),
+            closeButton.heightAnchor.constraint(equalToConstant: 40),
+
+            // Left separator line (before resolution dropdown)
+            leftSeparatorLine.leadingAnchor.constraint(equalTo: closeButton.trailingAnchor, constant: 8),
+            leftSeparatorLine.topAnchor.constraint(equalTo: view.topAnchor, constant: 0),
+            leftSeparatorLine.bottomAnchor.constraint(equalTo: view.bottomAnchor, constant: 0),
+            leftSeparatorLine.widthAnchor.constraint(equalToConstant: 3),
+
+            // Resolution popup - full height
+            resolutionPopup.leadingAnchor.constraint(equalTo: leftSeparatorLine.trailingAnchor, constant: 0),
+            resolutionPopup.topAnchor.constraint(equalTo: view.topAnchor, constant: 0),
+            resolutionPopup.bottomAnchor.constraint(equalTo: view.bottomAnchor, constant: 0),
+            resolutionPopup.widthAnchor.constraint(equalToConstant: 75),
+
+            // Separator 2 (between resolution and FPS)
+            separator2.leadingAnchor.constraint(equalTo: resolutionPopup.trailingAnchor, constant: 8),
+            separator2.topAnchor.constraint(equalTo: view.topAnchor, constant: 0),
+            separator2.bottomAnchor.constraint(equalTo: view.bottomAnchor, constant: 0),
+            separator2.widthAnchor.constraint(equalToConstant: 3),
+
+            // FPS popup - full height
+            fpsPopup.leadingAnchor.constraint(equalTo: separator2.trailingAnchor, constant: 8),
+            fpsPopup.topAnchor.constraint(equalTo: view.topAnchor, constant: 0),
+            fpsPopup.bottomAnchor.constraint(equalTo: view.bottomAnchor, constant: 0),
+            fpsPopup.widthAnchor.constraint(equalToConstant: 90),
+
+            // Separator 3 (between FPS and tracking mode)
+            separator3.leadingAnchor.constraint(equalTo: fpsPopup.trailingAnchor, constant: 8),
+            separator3.topAnchor.constraint(equalTo: view.topAnchor, constant: 0),
+            separator3.bottomAnchor.constraint(equalTo: view.bottomAnchor, constant: 0),
+            separator3.widthAnchor.constraint(equalToConstant: 3),
+
+            // Middle separator line (not used anymore but kept for compatibility)
+            middleSeparatorLine.leadingAnchor.constraint(equalTo: separator3.trailingAnchor, constant: 8),
+            middleSeparatorLine.topAnchor.constraint(equalTo: view.topAnchor, constant: 0),
+            middleSeparatorLine.bottomAnchor.constraint(equalTo: view.bottomAnchor, constant: 0),
+            middleSeparatorLine.widthAnchor.constraint(equalToConstant: 0),
+
+            // Tracking mode popup - full height
+            trackingModePopup.leadingAnchor.constraint(equalTo: separator3.trailingAnchor, constant: 8),
+            trackingModePopup.topAnchor.constraint(equalTo: view.topAnchor, constant: 0),
+            trackingModePopup.bottomAnchor.constraint(equalTo: view.bottomAnchor, constant: 0),
+            trackingModePopup.widthAnchor.constraint(equalToConstant: 150),
+
+            // Right separator line (after tracking mode dropdown)
+            rightSeparatorLine.leadingAnchor.constraint(equalTo: trackingModePopup.trailingAnchor, constant: 0),
+            rightSeparatorLine.topAnchor.constraint(equalTo: view.topAnchor, constant: 0),
+            rightSeparatorLine.bottomAnchor.constraint(equalTo: view.bottomAnchor, constant: 0),
+            rightSeparatorLine.widthAnchor.constraint(equalToConstant: 3),
+
+            // Timer (center-ish)
+            timerLabel.leadingAnchor.constraint(equalTo: rightSeparatorLine.trailingAnchor, constant: 24),
+            timerLabel.centerYAnchor.constraint(equalTo: view.centerYAnchor),
+            timerLabel.widthAnchor.constraint(equalToConstant: 80),
+
+            // Progress bar (next to timer, only visible during export)
+            progressIndicator.leadingAnchor.constraint(equalTo: timerLabel.trailingAnchor, constant: 8),
+            progressIndicator.centerYAnchor.constraint(equalTo: view.centerYAnchor),
+            progressIndicator.widthAnchor.constraint(equalToConstant: 100),
+            progressIndicator.heightAnchor.constraint(equalToConstant: 12),
+
+            // Completion label (same position as progress bar, shown after export)
+            completionLabel.leadingAnchor.constraint(equalTo: timerLabel.trailingAnchor, constant: 8),
+            completionLabel.centerYAnchor.constraint(equalTo: view.centerYAnchor),
+
+            // Export button (rightmost)
+            exportButton.trailingAnchor.constraint(equalTo: view.trailingAnchor, constant: -20),
+            exportButton.centerYAnchor.constraint(equalTo: view.centerYAnchor),
+            exportButton.widthAnchor.constraint(equalToConstant: 40),
+            exportButton.heightAnchor.constraint(equalToConstant: 40),
+
+            // Stop button (middle)
+            stopButton.trailingAnchor.constraint(equalTo: exportButton.leadingAnchor, constant: -10),
+            stopButton.centerYAnchor.constraint(equalTo: view.centerYAnchor),
+            stopButton.widthAnchor.constraint(equalToConstant: 40),
+            stopButton.heightAnchor.constraint(equalToConstant: 40),
+
+            // Record button (left of the three)
+            recordButton.trailingAnchor.constraint(equalTo: stopButton.leadingAnchor, constant: -10),
+            recordButton.centerYAnchor.constraint(equalTo: view.centerYAnchor),
+            recordButton.widthAnchor.constraint(equalToConstant: 40),
+            recordButton.heightAnchor.constraint(equalToConstant: 40),
+
+            // Record label (hidden)
+            recordLabel.centerXAnchor.constraint(equalTo: recordButton.centerXAnchor),
+            recordLabel.topAnchor.constraint(equalTo: recordButton.bottomAnchor, constant: 2),
+            recordLabel.widthAnchor.constraint(equalToConstant: 40),
+
+            // Stop label (hidden)
+            stopLabel.centerXAnchor.constraint(equalTo: stopButton.centerXAnchor),
+            stopLabel.topAnchor.constraint(equalTo: stopButton.bottomAnchor, constant: 2),
+            stopLabel.widthAnchor.constraint(equalToConstant: 40),
+
+            // Export label (hidden)
+            exportLabel.centerXAnchor.constraint(equalTo: exportButton.centerXAnchor),
+            exportLabel.topAnchor.constraint(equalTo: exportButton.bottomAnchor, constant: 2),
+            exportLabel.widthAnchor.constraint(equalToConstant: 40),
+        ])
+    }
+
+    private func createLabel(text: String, fontSize: CGFloat, weight: NSFont.Weight, color: NSColor) -> NSTextField {
+        let label = NSTextField(labelWithString: text)
+        label.font = NSFont.systemFont(ofSize: fontSize, weight: weight)
+        label.textColor = color
+        label.isEditable = false
+        label.isSelectable = false
+        label.isBordered = false
+        label.backgroundColor = .clear
+        return label
+    }
+
+
+    private func createIconButton(title: String, size: CGFloat) -> NSButton {
+        let button = NSButton()
+        button.title = ""
+        button.isBordered = false
+        button.wantsLayer = true
+        button.layer?.backgroundColor = NSColor(white: 0.2, alpha: 1.0).cgColor
+        button.layer?.cornerRadius = size / 2
+
+        let attr = NSMutableAttributedString(string: title)
+        attr.addAttribute(.foregroundColor, value: NSColor.white, range: NSRange(location: 0, length: title.count))
+        attr.addAttribute(.font, value: NSFont.systemFont(ofSize: size * 0.4), range: NSRange(location: 0, length: title.count))
+        button.attributedTitle = attr
+
+        return button
+    }
+
+    @objc private func startRecording() {
+        // Don't start if already recording
+        guard !isRecording else { return }
+
+        // Check for screen recording permission
+        guard ScreenRecorderNew.checkPermission() else {
+            let alert = NSAlert()
+            alert.messageText = "Screen Recording Permission Required"
+            alert.informativeText = "Please grant screen recording permission in System Settings > Privacy & Security > Screen Recording"
+            alert.alertStyle = .warning
+            alert.addButton(withTitle: "OK")
+            alert.runModal()
+            return
+        }
+
+        // Set recording state
+        isRecording = true
+        hasRecordedVideo = false
+
+        // Get selected resolution
+        let resolution = getSelectedResolution()
+
+        // CRITICAL: Set recording start time FIRST, before starting any tracking
+        // This ensures cursor tracking and video use the same time reference
+        recordingStartTime = Date()
+
+        // Create screen recorder with frame-synchronized cursor tracking
+        // Pass window ID if in window recording mode
+        screenRecorder = ScreenRecorderNew(resolution: resolution, windowID: selectedWindowID)
+
+        // Start tracking based on mode (using frame-synchronized tracking)
+        switch trackingMode {
+        case .zoomOnClicks:
+            // Start frame-synchronized click tracking
+            clickTracker = ClickTrackerNew()
+            clickTracker?.startTracking { [weak self] clickEvent in
+                self?.clickCount += 1
+            }
+        case .followCursor:
+            // Start frame-synchronized cursor tracking
+            cursorTracker = CursorTrackerNew()
+            cursorTracker?.startTracking()
+        case .recordWindow:
+            // No tracking needed for window recording mode
+            break
+        }
+
+        // Connect frame capture callback to both trackers
+        // This ensures clicks/cursor are sampled at the EXACT moment each video frame is captured
+        screenRecorder?.onFrameCaptured = { [weak self] timestamp in
+            // Sample click tracker (only processes if there's a pending click)
+            self?.clickTracker?.sampleClickAtFrameCapture(timestamp: timestamp)
+            // Sample cursor tracker (only processes if in cursor mode)
+            self?.cursorTracker?.sampleCursorAtFrameCapture(timestamp: timestamp)
+        }
+
+        // Start screen recording
+        screenRecorder?.startRecording { [weak self] error in
+            if let error = error {
+                DispatchQueue.main.async {
+                    let alert = NSAlert()
+                    alert.messageText = "Recording Error"
+                    alert.informativeText = error.localizedDescription
+                    alert.alertStyle = .critical
+                    alert.runModal()
+                }
+                return
+            }
+        }
+
+        // Start timer
+        startTimer()
+
+        // Update UI
+        clickCount = 0
+        resolutionPopup.isEnabled = false
+        fpsPopup.isEnabled = false
+        trackingModePopup.isEnabled = false
+        recordButton.isEnabled = false
+
+        // Start blinking animation on record button
+        startBlinkingRecordButton()
+    }
+
+    @objc private func stopRecording() {
+        // Only stop if recording
+        guard isRecording else { return }
+
+        // Set recording state
+        isRecording = false
+        hasRecordedVideo = true
+
+        // Stop recording
+        screenRecorder?.stopRecording()
+
+        // Stop tracking based on mode
+        clickTracker?.stopTracking()
+        cursorTracker?.stopTracking()
+
+        // Stop timer and blinking (keep showing the final time)
+        stopTimer()
+        stopBlinkingRecordButton()
+
+        // Update UI (timer keeps showing final recording time)
+        resolutionPopup.isEnabled = true
+        fpsPopup.isEnabled = true
+        trackingModePopup.isEnabled = true
+    }
+
+    @objc private func exportVideo() {
+        // Only export if we have a recorded video
+        guard hasRecordedVideo, let recorder = screenRecorder else { return }
+
+        // Show save dialog
+        let savePanel = NSSavePanel()
+        savePanel.allowedContentTypes = [.mpeg4Movie]
+
+        // Format: vibe-recording-YYYYMMDD-HHMMSS
+        let dateFormatter = DateFormatter()
+        dateFormatter.dateFormat = "yyyyMMdd-HHmmss"
+        let timestamp = dateFormatter.string(from: Date())
+        savePanel.nameFieldStringValue = "vibe-recording-\(timestamp).mp4"
+
+        savePanel.begin { [weak self] response in
+            guard response == .OK, let url = savePanel.url else {
+                // User cancelled - reset to initial state
+                self?.resetToInitialState()
+                return
+            }
+
+            // Show progress bar (timer stays visible)
+            self?.progressIndicator.isHidden = false
+            self?.progressIndicator.doubleValue = 0
+
+            // Get click events and cursor positions based on mode
+            let clickEvents = self?.clickTracker?.getEvents() ?? []
+            let cursorPositions = self?.cursorTracker?.getPositions()
+            let mode = self?.trackingMode ?? .zoomOnClicks
+
+            // Process video
+            recorder.exportWithZoom(clickEvents: clickEvents, cursorPositions: cursorPositions, trackingMode: mode, to: url, startTime: self?.recordingStartTime ?? Date()) { progress in
+                DispatchQueue.main.async {
+                    // Update progress bar with actual progress value (0-1 range)
+                    self?.progressIndicator.doubleValue = progress * 100
+                }
+            } completion: { error in
+                DispatchQueue.main.async {
+                    // Hide progress bar
+                    self?.progressIndicator.isHidden = true
+                    self?.progressIndicator.doubleValue = 0
+
+                    if let error = error {
+                        // Show error alert only for failures
+                        let alert = NSAlert()
+                        alert.messageText = "Export Failed"
+                        alert.informativeText = error.localizedDescription
+                        alert.alertStyle = .critical
+                        alert.runModal()
+                        self?.resetToInitialState()
+                    } else {
+                        // Show "Completed" label instead of popup
+                        self?.completionLabel.isHidden = false
+
+                        // Hide completion label after 5 seconds
+                        DispatchQueue.main.asyncAfter(deadline: .now() + 5.0) {
+                            self?.completionLabel.isHidden = true
+                            // Reset to initial state after showing completion
+                            self?.resetToInitialState()
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    private func resetToInitialState() {
+        // Clean up recording state
+        screenRecorder = nil
+        recordingStartTime = nil
+        clickCount = 0
+        isRecording = false
+        hasRecordedVideo = false
+
+        // Stop blinking if still active
+        stopBlinkingRecordButton()
+
+        // Reset UI to initial state (timer resets to 00:00 but stays visible)
+        timerLabel.stringValue = "00:00"
+        recordButton.isEnabled = true
+        resolutionPopup.isEnabled = true
+        fpsPopup.isEnabled = true
+        trackingModePopup.isEnabled = true
+    }
+
+    private func getSelectedResolution() -> CGSize {
+        // Get the actual screen size and aspect ratio
+        guard let screenSize = NSScreen.main?.frame.size else {
+            return CGSize(width: 3840, height: 2160)
+        }
+
+        let screenAspectRatio = screenSize.width / screenSize.height
+
+        switch resolutionPopup.indexOfSelectedItem {
+        case 0: // 4K height - maintain screen aspect ratio
+            let height: CGFloat = 2160
+            let width = height * screenAspectRatio
+            return CGSize(width: width, height: height)
+        case 1: // 1440p height - maintain screen aspect ratio
+            let height: CGFloat = 1440
+            let width = height * screenAspectRatio
+            return CGSize(width: width, height: height)
+        case 2: // 1080p height - maintain screen aspect ratio
+            let height: CGFloat = 1080
+            let width = height * screenAspectRatio
+            return CGSize(width: width, height: height)
+        default: // Native resolution
+            return screenSize
+        }
+    }
+
+    private func startTimer() {
+        timerUpdateTimer = Timer.scheduledTimer(withTimeInterval: 1.0, repeats: true) { [weak self] _ in
+            guard let startTime = self?.recordingStartTime else { return }
+            let elapsed = Int(Date().timeIntervalSince(startTime))
+            let minutes = elapsed / 60
+            let seconds = elapsed % 60
+            self?.timerLabel.stringValue = String(format: "%02d:%02d", minutes, seconds)
+        }
+    }
+
+    private func stopTimer() {
+        timerUpdateTimer?.invalidate()
+        timerUpdateTimer = nil
+    }
+
+    private func startBlinkingRecordButton() {
+        // Blink the record button to indicate recording
+        blinkTimer = Timer.scheduledTimer(withTimeInterval: 0.5, repeats: true) { [weak self] _ in
+            guard let self = self, let layer = self.recordButton.layer else { return }
+
+            // Toggle opacity
+            let currentOpacity = layer.opacity
+            layer.opacity = currentOpacity > 0.5 ? 0.3 : 1.0
+        }
+    }
+
+    private func stopBlinkingRecordButton() {
+        blinkTimer?.invalidate()
+        blinkTimer = nil
+
+        // Reset opacity to full
+        recordButton.layer?.opacity = 1.0
+    }
+
+    private func drawDownloadIcon() {
+        guard let layer = exportButton.layer else { return }
+
+        let size: CGFloat = 40
+        let iconSize: CGFloat = 22  // Increased from 16 to 22
+        let offsetX = (size - iconSize) / 2
+        let offsetY = (size - iconSize) / 2
+
+        // Create a shape layer for the download icon
+        let iconLayer = CAShapeLayer()
+        let path = CGMutablePath()
+
+        // Arrow shaft (vertical line)
+        path.move(to: CGPoint(x: offsetX + iconSize / 2, y: offsetY + iconSize * 0.25))
+        path.addLine(to: CGPoint(x: offsetX + iconSize / 2, y: offsetY + iconSize * 0.65))
+
+        // Arrow head (triangle)
+        path.move(to: CGPoint(x: offsetX + iconSize / 2, y: offsetY + iconSize * 0.75))
+        path.addLine(to: CGPoint(x: offsetX + iconSize * 0.3, y: offsetY + iconSize * 0.55))
+        path.move(to: CGPoint(x: offsetX + iconSize / 2, y: offsetY + iconSize * 0.75))
+        path.addLine(to: CGPoint(x: offsetX + iconSize * 0.7, y: offsetY + iconSize * 0.55))
+
+        // Tray at bottom (U-shape)
+        path.move(to: CGPoint(x: offsetX + iconSize * 0.2, y: offsetY + iconSize * 0.85))
+        path.addLine(to: CGPoint(x: offsetX + iconSize * 0.2, y: offsetY + iconSize * 0.95))
+        path.addLine(to: CGPoint(x: offsetX + iconSize * 0.8, y: offsetY + iconSize * 0.95))
+        path.addLine(to: CGPoint(x: offsetX + iconSize * 0.8, y: offsetY + iconSize * 0.85))
+
+        iconLayer.path = path
+        iconLayer.strokeColor = NSColor.white.cgColor
+        iconLayer.fillColor = NSColor.clear.cgColor
+        iconLayer.lineWidth = 2
+        iconLayer.lineCap = .round
+        iconLayer.lineJoin = .round
+
+        layer.addSublayer(iconLayer)
+    }
+
+    // MARK: - Window Selection
+    private func showWindowSelectionDialog(completion: @escaping (CGWindowID?, String?) -> Void) {
+        // Use hover-based window selection (no overlay)
+        let selector = WindowSelector()
+        selector.onWindowSelected = { windowID, appName in
+            completion(windowID, appName)
+        }
+        selector.start()
+
+        // Auto-stop after 10 seconds if no selection
+        DispatchQueue.main.asyncAfter(deadline: .now() + 10.0) {
+            selector.stop()
+        }
+    }
+}
+
+// MARK: - Draggable View
+class DraggableView: NSView {
+    private var initialLocation: NSPoint?
+
+    override func mouseDown(with event: NSEvent) {
+        initialLocation = event.locationInWindow
+    }
+
+    override func mouseDragged(with event: NSEvent) {
+        guard let window = self.window,
+              let initialLocation = initialLocation else { return }
+
+        let currentLocation = event.locationInWindow
+        let newOrigin = NSPoint(
+            x: window.frame.origin.x + (currentLocation.x - initialLocation.x),
+            y: window.frame.origin.y + (currentLocation.y - initialLocation.y)
+        )
+
+        window.setFrameOrigin(newOrigin)
+    }
+}
+
+// MARK: - Window Selection Overlay (REMOVED - Now using WindowSelector)
+// The old overlay-based window selection has been replaced with
+// a hover-based system using WindowSelector.swift that focuses
+// windows on mouse hover without any UI overlay.
+    private var overlayWindow: NSWindow?
+    private var highlightWindow: NSWindow?
+    private var completion: ((CGWindowID?, String?) -> Void)?
+    private var eventMonitor: Any?
+    private var globalEventMonitor: Any?
+    private var currentWindowID: CGWindowID?
+    private var trackingTimer: Timer?
+
+    init(completion: @escaping (CGWindowID?, String?) -> Void) {
+        self.completion = completion
+    }
+
+    func show() {
+        // Create fullscreen transparent overlay
+        guard let screen = NSScreen.main else { return }
+
+        let overlayWindow = KeyableWindow(
+            contentRect: screen.frame,
+            styleMask: [.borderless],
+            backing: .buffered,
+            defer: false
+        )
+
+        overlayWindow.backgroundColor = NSColor.clear  // Transparent background - no dark overlay
+        overlayWindow.isOpaque = false
+        overlayWindow.level = .statusBar  // Above everything so we can capture events
+        overlayWindow.ignoresMouseEvents = false  // Capture events on overlay
+        overlayWindow.collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary, .stationary]
+
+        // Enable keyboard and mouse events
+        overlayWindow.acceptsMouseMovedEvents = true
+        overlayWindow.isReleasedWhenClosed = false
+
+        // Create instruction label
+        let label = NSTextField(labelWithString: "Click on a window to start recording")
+        label.font = NSFont.systemFont(ofSize: 24, weight: .bold)
+        label.textColor = .white
+        label.alignment = .center
+        label.frame = NSRect(
+            x: (screen.frame.width - 500) / 2,
+            y: screen.frame.height - 100,
+            width: 500,
+            height: 40
+        )
+
+        let escLabel = NSTextField(labelWithString: "Press ESC to cancel")
+        escLabel.font = NSFont.systemFont(ofSize: 14, weight: .regular)
+        escLabel.textColor = .white
+        escLabel.alignment = .center
+        escLabel.frame = NSRect(
+            x: (screen.frame.width - 300) / 2,
+            y: screen.frame.height - 140,
+            width: 300,
+            height: 20
+        )
+
+        overlayWindow.contentView?.addSubview(label)
+        overlayWindow.contentView?.addSubview(escLabel)
+
+        // Create highlight window (initially hidden)
+        let highlightWindow = NSWindow(
+            contentRect: .zero,
+            styleMask: [.borderless],
+            backing: .buffered,
+            defer: false
+        )
+
+        highlightWindow.backgroundColor = .clear
+        highlightWindow.isOpaque = false
+        highlightWindow.level = .statusBar  // Same level as overlay
+        highlightWindow.ignoresMouseEvents = true
+        highlightWindow.hasShadow = false
+
+        let highlightView = NSView(frame: .zero)
+        highlightView.wantsLayer = true
+        highlightView.layer?.borderColor = NSColor.systemBlue.cgColor
+        highlightView.layer?.borderWidth = 5  // Slightly thicker for better visibility
+        highlightView.layer?.backgroundColor = NSColor.systemBlue.withAlphaComponent(0.15).cgColor  // Slightly more visible
+        highlightView.layer?.cornerRadius = 6  // Rounded corners like macOS native tool
+        highlightWindow.contentView = highlightView
+
+        self.overlayWindow = overlayWindow
+        self.highlightWindow = highlightWindow
+
+        overlayWindow.makeKeyAndOrderFront(nil)
+        highlightWindow.orderFront(nil)
+
+        // Ensure the overlay window becomes the key window to receive keyboard events
+        overlayWindow.makeFirstResponder(overlayWindow.contentView)
+
+        // Use arrow cursor (like macOS native screenshot tool)
+        NSCursor.arrow.set()
+
+        // Use local event monitor to track mouse events on the overlay
+        eventMonitor = NSEvent.addLocalMonitorForEvents(matching: [.mouseMoved, .leftMouseDown, .keyDown]) { [weak self] event in
+            guard let self = self else { return event }
+
+            if event.type == .keyDown && event.keyCode == 53 { // ESC key
+                self.dismiss(selectedWindowID: nil, windowName: nil)
+                return nil
+            }
+
+            if event.type == .mouseMoved {
+                self.highlightWindowAtCursor()
+                return event
+            }
+
+            if event.type == .leftMouseDown {
+                print("🔵 Click detected!")
+                print("🔵 Current window ID: \(String(describing: self.currentWindowID))")
+                if let windowID = self.currentWindowID,
+                   let windowInfo = self.getWindowInfo(for: windowID) {
+                    print("🔵 Selecting window: \(windowInfo.name)")
+                    self.dismiss(selectedWindowID: windowID, windowName: windowInfo.name)
+                } else {
+                    print("🔵 No window found, canceling")
+                    // No window under cursor, cancel selection
+                    self.dismiss(selectedWindowID: nil, windowName: nil)
+                }
+                return nil
+            }
+
+            return event
+        }
+
+        // Add global monitor for ESC as fallback
+        globalEventMonitor = NSEvent.addGlobalMonitorForEvents(matching: .keyDown) { [weak self] event in
+            guard let self = self else { return }
+
+            if event.keyCode == 53 { // ESC key
+                DispatchQueue.main.async {
+                    self.dismiss(selectedWindowID: nil, windowName: nil)
+                }
+            }
+        }
+
+        // Start periodic updates for smooth tracking
+        startMouseTracking()
+    }
+
+    private func startMouseTracking() {
+        // Update highlight at 60fps for smooth tracking
+        trackingTimer = Timer.scheduledTimer(withTimeInterval: 1.0/60.0, repeats: true) { [weak self] _ in
+            self?.highlightWindowAtCursor()
+        }
+    }
+
+    private func highlightWindowAtCursor() {
+        // Get current mouse position
+        let screenPoint = NSEvent.mouseLocation
+
+        // Get window at cursor position - exclude our overlay windows
+        let overlayWindowNumber = overlayWindow?.windowNumber ?? 0
+        let highlightWindowNumber = highlightWindow?.windowNumber ?? 0
+
+        guard let windowList = CGWindowListCopyWindowInfo([.optionOnScreenOnly, .excludeDesktopElements], kCGNullWindowID) as? [[String: Any]] else {
+            return
+        }
+
+        // Find the topmost window at cursor position
+        for window in windowList {
+            guard let windowID = window[kCGWindowNumber as String] as? CGWindowID,
+                  let boundsDict = window[kCGWindowBounds as String] as? [String: Any],
+                  let x = boundsDict["X"] as? CGFloat,
+                  let y = boundsDict["Y"] as? CGFloat,
+                  let width = boundsDict["Width"] as? CGFloat,
+                  let height = boundsDict["Height"] as? CGFloat,
+                  let ownerName = window[kCGWindowOwnerName as String] as? String,
+                  let windowLayer = window[kCGWindowLayer as String] as? Int,
+                  windowLayer == 0 else {
+                continue
+            }
+
+            // Skip our overlay and highlight windows
+            if windowID == overlayWindowNumber || windowID == highlightWindowNumber {
+                continue
+            }
+
+            // Skip all VibeRecorder windows
+            if ownerName == "VibeRecorder" {
+                continue
+            }
+
+            // Convert coordinates (macOS screen coordinates start from bottom-left)
+            let screenHeight = NSScreen.main?.frame.height ?? 0
+            let windowRect = NSRect(x: x, y: screenHeight - y - height, width: width, height: height)
+
+            if windowRect.contains(screenPoint) {
+                // Highlight this window with smooth animation
+                currentWindowID = windowID
+                NSAnimationContext.runAnimationGroup { context in
+                    context.duration = 0.15  // Fast but smooth animation
+                    context.timingFunction = CAMediaTimingFunction(name: .easeOut)
+                    highlightWindow?.animator().setFrame(windowRect, display: true)
+                }
+                return
+            }
+        }
+
+        // No window found - hide highlight smoothly
+        currentWindowID = nil
+        NSAnimationContext.runAnimationGroup { context in
+            context.duration = 0.1
+            highlightWindow?.animator().setFrame(.zero, display: true)
+        }
+    }
+
+    private func getWindowInfo(for windowID: CGWindowID) -> (name: String, app: String)? {
+        guard let windowInfo = CGWindowListCopyWindowInfo(.optionIncludingWindow, windowID) as? [[String: Any]],
+              let window = windowInfo.first,
+              let ownerName = window[kCGWindowOwnerName as String] as? String else {
+            return nil
+        }
+
+        let windowName = window[kCGWindowName as String] as? String ?? "Untitled"
+        return (name: "\(ownerName) - \(windowName)", app: ownerName)
+    }
+
+    private func dismiss(selectedWindowID: CGWindowID?, windowName: String?) {
+        // Stop tracking timer
+        trackingTimer?.invalidate()
+        trackingTimer = nil
+
+        // Remove event monitors
+        if let monitor = eventMonitor {
+            NSEvent.removeMonitor(monitor)
+            eventMonitor = nil
+        }
+
+        if let monitor = globalEventMonitor {
+            NSEvent.removeMonitor(monitor)
+            globalEventMonitor = nil
+        }
+
+        // Restore cursor
+        NSCursor.arrow.set()
+
+        // Close windows
+        overlayWindow?.close()
+        highlightWindow?.close()
+        overlayWindow = nil
+        highlightWindow = nil
+
+        // Call completion
+        completion?(selectedWindowID, windowName)
+        completion = nil
+    }
+}

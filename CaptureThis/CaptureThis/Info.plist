@@ -1,0 +1,23 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<key>CFBundleName</key>
+	<string>CaptureThis</string>
+	<key>CFBundleDisplayName</key>
+	<string>CaptureThis</string>
+	<key>CFBundleDocumentTypes</key>
+	<array>
+		<dict/>
+		<dict/>
+	</array>
+	<key>NSMicrophoneUsageDescription</key>
+	<string>CaptureThis needs access to your microphone to provide real-time speech-to-text transcription and generate subtitles during screen recording.</string>
+	<key>NSCameraUsageDescription</key>
+	<string>CaptureThis needs access to your camera to record a selfie picture-in-picture alongside your screen recording.</string>
+	<key>NSSpeechRecognitionUsageDescription</key>
+	<string>CaptureThis uses speech recognition to generate real-time subtitles from your voice during screen recording.</string>
+	<key>NSAppleEventsUsageDescription</key>
+	<string>CaptureThis needs to control other applications to temporarily hide and restore windows when selecting which window to record.</string>
+</dict>
+</plist>
