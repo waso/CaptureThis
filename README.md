@@ -55,7 +55,7 @@ Whether you're making tutorials, product demos, bug reports, or presentations, C
 - **On-screen subtitle display** -- Captions appear as a floating overlay during recording so you can monitor accuracy
 - **Burned into export** -- Subtitles are composited into the final video with proper timing and fade effects
 
-### Cursor Tracking & Click Visualization
+### Cursor Tracking
 
 - **Three zoom modes:**
   - **No Zoom** -- Standard recording, no cursor tracking
