@@ -26,7 +26,7 @@
 
 ---
 
-CaptureThis is a native macOS screen recording application built for creators who need more than just a screen capture. Record your screen in **4K at 60fps**, overlay your **selfie camera**, generate **real-time subtitles** from your voice, **annotate on-screen** while recording, track every **mouse click** with intelligent zoom, and edit everything in a built-in **timeline editor** -- all without leaving the app.
+CaptureThis is a native macOS screen recording application built for creators who need more than just a screen capture. Record your screen in **4K at 60fps**, overlay your **selfie camera**, **annotate on-screen** while recording, track every **mouse click** with intelligent zoom, and edit everything in a built-in **timeline editor** -- all without leaving the app.
 
 Whether you're making tutorials, product demos, bug reports, or presentations, CaptureThis gives you a polished result straight out of the box.
 
@@ -48,12 +48,6 @@ Whether you're making tutorials, product demos, bug reports, or presentations, C
 - **Mirror toggle** -- Flip the selfie feed horizontally for a natural look
 - **Drag & resize** -- Position and size the selfie overlay exactly where you want it
 - **Composited into final video** -- The selfie overlay is rendered directly into the exported file
-
-### Real-Time Subtitles
-
-- **Live speech-to-text** -- Powered by Apple's Speech Recognition framework, your voice is transcribed in real-time as you record
-- **On-screen subtitle display** -- Captions appear as a floating overlay during recording so you can monitor accuracy
-- **Burned into export** -- Subtitles are composited into the final video with proper timing and fade effects
 
 ### Cursor Tracking
 
@@ -158,10 +152,9 @@ CaptureThis requires the following macOS permissions to function:
 | Permission | Why |
 |---|---|
 | **Screen Recording** | To capture your display content |
-| **Microphone** | To record your voice and generate real-time subtitles |
+| **Microphone** | To record your voice |
 | **Camera** | To capture selfie camera footage for picture-in-picture |
 | **Accessibility** | To detect mouse clicks for zoom-on-click tracking |
-| **Speech Recognition** | To transcribe your speech into subtitles |
 
 You will be prompted to grant each permission on first use. You can manage these in **System Settings > Privacy & Security**.
 
@@ -174,7 +167,6 @@ CaptureThis is built entirely in **Swift** using native macOS frameworks:
 | Screen capture | [ScreenCaptureKit](https://developer.apple.com/documentation/screencapturekit) (SCStream) |
 | Video encoding | [AVFoundation](https://developer.apple.com/documentation/avfoundation) (AVAssetWriter) |
 | Video editing | AVFoundation (AVMutableComposition) |
-| Speech recognition | [Speech](https://developer.apple.com/documentation/speech) framework (SFSpeechRecognizer) |
 | Camera capture | AVFoundation (AVCaptureSession) |
 | Click tracking | CoreGraphics (CGEventTap) |
 | UI | AppKit (NSViewController, NSView) |
@@ -190,12 +182,10 @@ CaptureThis/
 ├── VideoProcessor.swift               # Video composition & effects rendering
 ├── TimelineView.swift                 # Timeline editor component
 ├── MissionControlWindowSelector.swift # Window picker UI
-├── AppleSpeechRecognizer.swift        # Speech-to-text engine
 ├── SelfieCameraController.swift       # Webcam capture & preview
 ├── ClickTrackerNew.swift              # Mouse click event detection
 ├── CursorTrackerNew.swift             # Cursor position sampling
 ├── DrawingOverlay.swift               # On-screen annotation canvas
-├── SubtitleOverlay.swift              # Real-time subtitle display
 ├── FloatingRecordingIndicator.swift   # Recording timer & controls
 └── WindowSelector.swift               # Window hover selection
 ```
@@ -205,8 +195,7 @@ CaptureThis/
 1. **ScreenCaptureKit** delivers video frames at 60fps via `SCStream`
 2. Each frame triggers synchronized **cursor position** and **click event** sampling
 3. **AVAssetWriter** encodes frames to H.264 with separate audio tracks for system audio and microphone
-4. **Speech recognition** runs concurrently, generating timestamped subtitle entries
-5. On stop, **VideoProcessor** composites everything into the final video: zoom effects, subtitles, selfie overlay, background, and borders
+4. On stop, **VideoProcessor** composites everything into the final video: zoom effects, selfie overlay, background, and borders
 
 ## System Requirements
 
@@ -223,7 +212,6 @@ CaptureThis respects your privacy:
 - **No telemetry** -- Analytics are completely disabled
 - **No cloud sync** -- All recordings stay on your Mac
 - **No network requests** -- The app works entirely offline
-- **Local processing** -- Speech recognition runs on-device via Apple's framework
 - **Open source** -- Inspect every line of code yourself
 
 ## Contributing
