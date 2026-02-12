@@ -25,6 +25,9 @@ final class SelfieCameraController: NSObject {
     private(set) var isEnabled: Bool = false
     private(set) var isMirrored: Bool = true
     private var isRecording = false
+    private(set) var isPaused = false
+    private var pauseStartTime: CMTime?
+    private var totalPausedDuration: CMTime = .zero
 
     // Selected camera device (nil = default front camera)
     var selectedCameraDevice: AVCaptureDevice?
@@ -155,6 +158,9 @@ final class SelfieCameraController: NSObject {
         isWritingEnabled = false
         hasSignaledReady = false
         selfieFirstSampleTime = nil
+        isPaused = false
+        pauseStartTime = nil
+        totalPausedDuration = .zero
         selfieWriterInput = nil
         onReadyCallback = onReady
 
@@ -192,6 +198,16 @@ final class SelfieCameraController: NSObject {
     func beginWriting() {
         isWritingEnabled = true
         print("SelfieCameraController: Writing enabled")
+    }
+
+    func pause() {
+        isPaused = true
+        print("SelfieCameraController: Paused")
+    }
+
+    func resume() {
+        isPaused = false
+        print("SelfieCameraController: Resumed")
     }
 
     func stopRecording(completion: @escaping (URL?, [SelfieOverlayEvent], TimeInterval) -> Void) {
@@ -484,6 +500,21 @@ extension SelfieCameraController: AVCaptureVideoDataOutputSampleBufferDelegate {
         guard let writer = selfieWriter else { return }
         guard CMSampleBufferDataIsReady(sampleBuffer) else { return }
 
+        // Pause handling — skip frames during pause, adjust timestamps on resume
+        if isPaused {
+            if pauseStartTime == nil, selfieFirstSampleTime != nil {
+                pauseStartTime = CMSampleBufferGetPresentationTimeStamp(sampleBuffer)
+            }
+            return
+        }
+        if let pauseStart = pauseStartTime {
+            let rawPTS = CMSampleBufferGetPresentationTimeStamp(sampleBuffer)
+            let pauseDuration = CMTimeSubtract(rawPTS, pauseStart)
+            totalPausedDuration = CMTimeAdd(totalPausedDuration, pauseDuration)
+            pauseStartTime = nil
+            print("SelfieCameraController: Pause ended. Gap: \(CMTimeGetSeconds(pauseDuration))s, Total paused: \(CMTimeGetSeconds(totalPausedDuration))s")
+        }
+
         // Initialize writer input on first writable frame (needs format info from the sample)
         if selfieWriterInput == nil {
             guard let formatDescription = CMSampleBufferGetFormatDescription(sampleBuffer) else { return }
@@ -522,9 +553,9 @@ extension SelfieCameraController: AVCaptureVideoDataOutputSampleBufferDelegate {
         guard let firstTime = selfieFirstSampleTime else { return }
         guard let writerInput = selfieWriterInput, writerInput.isReadyForMoreMediaData else { return }
 
-        // Normalize timestamp to 0-based
+        // Normalize timestamp to 0-based, minus paused duration
         let pts = CMSampleBufferGetPresentationTimeStamp(sampleBuffer)
-        let adjustedTime = CMTimeSubtract(pts, firstTime)
+        let adjustedTime = CMTimeSubtract(CMTimeSubtract(pts, firstTime), totalPausedDuration)
 
         var timingInfo = CMSampleTimingInfo(
             duration: CMSampleBufferGetDuration(sampleBuffer),

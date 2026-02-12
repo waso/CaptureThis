@@ -2670,8 +2670,9 @@ class MainViewController: NSViewController {
         pauseStartTime = Date()  // Track when pause started
         print("MainViewController: Recording paused")
 
-        // Pause the screen recorder
+        // Pause the screen recorder and selfie camera
         screenRecorder?.pause()
+        selfieCameraController.pause()
 
         // Stop timer counting
         stopTimer()
@@ -2706,8 +2707,9 @@ class MainViewController: NSViewController {
         isPaused = false
         print("MainViewController: Recording resumed")
 
-        // Resume the screen recorder
+        // Resume the screen recorder and selfie camera
         screenRecorder?.resume()
+        selfieCameraController.resume()
 
         // Restart timer counting
         startTimer()

@@ -627,38 +627,16 @@ class ScreenRecorderNew: NSObject {
 
     func pause() {
         guard isRecording && !isPaused else { return }
-
         isPaused = true
-        print("ScreenRecorder: Recording paused")
-
-        if let stream = stream {
-            Task {
-                do {
-                    try await stream.stopCapture()
-                    print("ScreenRecorder: Stream paused")
-                } catch {
-                    print("ScreenRecorder: Error pausing stream: \(error)")
-                }
-            }
-        }
+        streamOutput?.isPaused = true
+        print("ScreenRecorder: Recording paused (stream keeps running, frames gated)")
     }
 
     func resume() {
         guard isRecording && isPaused else { return }
-
         isPaused = false
+        streamOutput?.isPaused = false
         print("ScreenRecorder: Recording resumed")
-
-        if let stream = stream {
-            Task {
-                do {
-                    try await stream.startCapture()
-                    print("ScreenRecorder: Stream resumed")
-                } catch {
-                    print("ScreenRecorder: Error resuming stream: \(error)")
-                }
-            }
-        }
     }
 
     func exportWithZoom(
@@ -722,6 +700,25 @@ class StreamOutput: NSObject, SCStreamOutput {
     private var hasSignaledReady = false
     var onFirstFrameReady: (() -> Void)?
 
+    // Pause state — frames are skipped during pause, timestamps adjusted on resume
+    private let pauseLock = NSLock()
+    private var _isPaused: Bool = false
+    var isPaused: Bool {
+        get {
+            pauseLock.lock()
+            defer { pauseLock.unlock() }
+            return _isPaused
+        }
+        set {
+            pauseLock.lock()
+            _isPaused = newValue
+            pauseLock.unlock()
+            print("StreamOutput: isPaused set to \(newValue)")
+        }
+    }
+    private var pauseStartTime: CMTime?
+    private var totalPausedDuration: CMTime = .zero
+
     // Thread-safe mute flag - can be toggled during recording
     private let muteLock = NSLock()
     private var _isAudioMuted: Bool = false
@@ -781,6 +778,25 @@ class StreamOutput: NSObject, SCStreamOutput {
             // Don't write until MainViewController enables writing (synchronized start)
             guard writingEnabled else { return }
 
+            // Pause handling — skip frames during pause, adjust timestamps on resume
+            let rawPTS = CMSampleBufferGetPresentationTimeStamp(sampleBuffer)
+            pauseLock.lock()
+            if _isPaused {
+                if pauseStartTime == nil, firstSampleTime != nil {
+                    pauseStartTime = rawPTS
+                }
+                pauseLock.unlock()
+                return
+            }
+            if let pauseStart = pauseStartTime {
+                let pauseDuration = CMTimeSubtract(rawPTS, pauseStart)
+                totalPausedDuration = CMTimeAdd(totalPausedDuration, pauseDuration)
+                pauseStartTime = nil
+                print("StreamOutput: Pause ended. Gap: \(CMTimeGetSeconds(pauseDuration))s, Total paused: \(CMTimeGetSeconds(totalPausedDuration))s")
+            }
+            let currentTotalPaused = totalPausedDuration
+            pauseLock.unlock()
+
             // Start writer on first writable sample
             if assetWriter.status == .unknown {
                 let startTime = CMSampleBufferGetPresentationTimeStamp(sampleBuffer)
@@ -790,10 +806,10 @@ class StreamOutput: NSObject, SCStreamOutput {
                 print("StreamOutput: Started writing at time 0s (normalized from \(CMTimeGetSeconds(startTime))s)")
             }
 
-            // Adjust timestamp to be relative to first frame
+            // Adjust timestamp to be relative to first frame, minus paused duration
             guard let firstSampleTime = firstSampleTime else { return }
             let presentationTime = CMSampleBufferGetPresentationTimeStamp(sampleBuffer)
-            let adjustedTime = CMTimeSubtract(presentationTime, firstSampleTime)
+            let adjustedTime = CMTimeSubtract(CMTimeSubtract(presentationTime, firstSampleTime), currentTotalPaused)
             let adjustedBuffer = adjustSampleBufferTiming(sampleBuffer, newPresentationTime: adjustedTime)
 
             // Write sample if ready
@@ -817,11 +833,30 @@ class StreamOutput: NSObject, SCStreamOutput {
                 return
             }
 
+            // Pause handling — skip audio during pause, adjust timestamps on resume
+            pauseLock.lock()
+            if _isPaused {
+                if pauseStartTime == nil, firstSampleTime != nil {
+                    pauseStartTime = CMSampleBufferGetPresentationTimeStamp(sampleBuffer)
+                }
+                pauseLock.unlock()
+                return
+            }
+            if let pauseStart = pauseStartTime {
+                let rawPTS = CMSampleBufferGetPresentationTimeStamp(sampleBuffer)
+                let pauseDuration = CMTimeSubtract(rawPTS, pauseStart)
+                totalPausedDuration = CMTimeAdd(totalPausedDuration, pauseDuration)
+                pauseStartTime = nil
+                print("StreamOutput: Audio pause ended. Gap: \(CMTimeGetSeconds(pauseDuration))s, Total paused: \(CMTimeGetSeconds(totalPausedDuration))s")
+            }
+            let currentTotalPaused = totalPausedDuration
+            pauseLock.unlock()
+
             // Only write audio after video session has started
             if let firstSampleTime = firstSampleTime, audioWriterInput.isReadyForMoreMediaData {
-                // Adjust timestamp to be relative to first frame
+                // Adjust timestamp to be relative to first frame, minus paused duration
                 let presentationTime = CMSampleBufferGetPresentationTimeStamp(sampleBuffer)
-                let adjustedTime = CMTimeSubtract(presentationTime, firstSampleTime)
+                let adjustedTime = CMTimeSubtract(CMTimeSubtract(presentationTime, firstSampleTime), currentTotalPaused)
 
                 // Skip audio samples that arrived before the first video frame
                 guard adjustedTime >= .zero else { return }
@@ -867,8 +902,17 @@ class StreamOutput: NSObject, SCStreamOutput {
         guard let firstSampleTime = firstSampleTime else { return }
         guard micInput.isReadyForMoreMediaData else { return }
 
+        // Pause handling — skip mic audio during pause
+        pauseLock.lock()
+        if _isPaused {
+            pauseLock.unlock()
+            return
+        }
+        let currentTotalPaused = totalPausedDuration
+        pauseLock.unlock()
+
         let presentationTime = CMSampleBufferGetPresentationTimeStamp(sampleBuffer)
-        let adjustedTime = CMTimeSubtract(presentationTime, firstSampleTime)
+        let adjustedTime = CMTimeSubtract(CMTimeSubtract(presentationTime, firstSampleTime), currentTotalPaused)
         guard adjustedTime >= .zero else { return }
         let adjustedBuffer = adjustSampleBufferTiming(sampleBuffer, newPresentationTime: adjustedTime)
 
