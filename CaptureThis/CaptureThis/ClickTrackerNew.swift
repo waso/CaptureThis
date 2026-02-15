@@ -12,6 +12,7 @@ struct ClickEventNew {
 class ClickTrackerNew {
     private var eventTap: CFMachPort?
     private var runLoopSource: CFRunLoopSource?
+    private var globalMonitor: Any?
     private var clickEvents: [ClickEventNew] = []
     private var isTracking = false
     private var pendingClickLocation: CGPoint?
@@ -36,39 +37,63 @@ class ClickTrackerNew {
             windowBounds = nil
         }
 
-        // Create event tap to monitor mouse clicks globally
-        let eventMask = (1 << CGEventType.leftMouseDown.rawValue) |
-                        (1 << CGEventType.rightMouseDown.rawValue)
+        // Try CGEvent tap first (requires Accessibility permission)
+        var eventTapCreated = false
 
-        guard let eventTap = CGEvent.tapCreate(
-            tap: .cgSessionEventTap,
-            place: .headInsertEventTap,
-            options: .defaultTap,
-            eventsOfInterest: CGEventMask(eventMask),
-            callback: { (proxy, type, event, refcon) -> Unmanaged<CGEvent>? in
-                guard let refcon = refcon else { return Unmanaged.passRetained(event) }
+        let trusted = AXIsProcessTrustedWithOptions(
+            [kAXTrustedCheckOptionPrompt.takeUnretainedValue(): true] as CFDictionary
+        )
+        print("ClickTrackerNew: Accessibility trusted = \(trusted)")
 
-                let tracker = Unmanaged<ClickTrackerNew>.fromOpaque(refcon).takeUnretainedValue()
-                tracker.handleClickEvent(event: event)
+        if trusted {
+            let eventMask = (1 << CGEventType.leftMouseDown.rawValue) |
+                            (1 << CGEventType.rightMouseDown.rawValue)
 
-                return Unmanaged.passRetained(event)
-            },
-            userInfo: Unmanaged.passUnretained(self).toOpaque()
-        ) else {
-            print("ClickTrackerNew: Failed to create event tap. Make sure the app has Accessibility permissions.")
-            return
+            if let tap = CGEvent.tapCreate(
+                tap: .cgSessionEventTap,
+                place: .headInsertEventTap,
+                options: .listenOnly,
+                eventsOfInterest: CGEventMask(eventMask),
+                callback: { (proxy, type, event, refcon) -> Unmanaged<CGEvent>? in
+                    guard let refcon = refcon else { return Unmanaged.passRetained(event) }
+                    let tracker = Unmanaged<ClickTrackerNew>.fromOpaque(refcon).takeUnretainedValue()
+                    tracker.handleClickEvent(event: event)
+                    return Unmanaged.passRetained(event)
+                },
+                userInfo: Unmanaged.passUnretained(self).toOpaque()
+            ) {
+                self.eventTap = tap
+                runLoopSource = CFMachPortCreateRunLoopSource(kCFAllocatorDefault, tap, 0)
+                CFRunLoopAddSource(CFRunLoopGetCurrent(), runLoopSource, .commonModes)
+                CGEvent.tapEnable(tap: tap, enable: true)
+                eventTapCreated = true
+                print("ClickTrackerNew: CGEvent tap created successfully")
+            } else {
+                print("ClickTrackerNew: CGEvent tap creation failed despite being trusted")
+            }
         }
 
-        self.eventTap = eventTap
+        // Fallback: use NSEvent global monitor (no Accessibility permission needed)
+        if !eventTapCreated {
+            print("ClickTrackerNew: Using NSEvent global monitor fallback")
+            globalMonitor = NSEvent.addGlobalMonitorForEvents(
+                matching: [.leftMouseDown, .rightMouseDown]
+            ) { [weak self] event in
+                // NSEvent.mouseLocation uses bottom-left origin (AppKit coordinates)
+                // Convert to top-left origin (CoreGraphics coordinates) for consistency
+                guard let screen = NSScreen.main else { return }
+                let screenHeight = screen.frame.height
+                // For global monitor, use NSEvent.mouseLocation (screen coordinates)
+                let screenLocation = NSEvent.mouseLocation
+                let cgLocation = CGPoint(
+                    x: screenLocation.x,
+                    y: screenHeight - screenLocation.y
+                )
+                self?.handleClickAtLocation(cgLocation)
+            }
+        }
 
-        // Add to run loop
-        runLoopSource = CFMachPortCreateRunLoopSource(kCFAllocatorDefault, eventTap, 0)
-        CFRunLoopAddSource(CFRunLoopGetCurrent(), runLoopSource, .commonModes)
-
-        // Enable the event tap
-        CGEvent.tapEnable(tap: eventTap, enable: true)
-
-        print("ClickTrackerNew: Started (frame-synchronized mode)")
+        print("ClickTrackerNew: Started (frame-synchronized mode, eventTap=\(eventTapCreated))")
     }
 
     private func getWindowBounds(windowID: CGWindowID) -> CGRect? {
@@ -83,9 +108,6 @@ class ClickTrackerNew {
             return nil
         }
 
-        // CGWindowListCopyWindowInfo returns coordinates with origin at TOP-LEFT
-        // CGEvent.location also uses top-left origin (different from NSEvent!)
-        // So we can use these coordinates directly
         return CGRect(x: x, y: y, width: width, height: height)
     }
 
@@ -104,8 +126,14 @@ class ClickTrackerNew {
             CFRunLoopRemoveSource(CFRunLoopGetCurrent(), runLoopSource, .commonModes)
         }
 
+        // Remove NSEvent monitor if used
+        if let monitor = globalMonitor {
+            NSEvent.removeMonitor(monitor)
+        }
+
         eventTap = nil
         runLoopSource = nil
+        globalMonitor = nil
         pendingClickLocation = nil
 
         print("ClickTrackerNew: Stopped. Total clicks: \(clickEvents.count)")
@@ -116,6 +144,12 @@ class ClickTrackerNew {
         // We'll save it when the next frame is captured
         pendingClickLocation = event.location
         print("ClickTrackerNew: Click detected at: \(event.location)")
+    }
+
+    private func handleClickAtLocation(_ location: CGPoint) {
+        // Same as handleClickEvent but takes a CGPoint directly (for NSEvent fallback)
+        pendingClickLocation = location
+        print("ClickTrackerNew: Click detected (NSEvent) at: \(location)")
     }
 
     // Called by ScreenRecorder when each frame is captured
@@ -133,25 +167,17 @@ class ClickTrackerNew {
 
         if let bounds = windowBounds {
             // Recording a specific window - convert to window-relative coordinates
-            // clickLocation is from CGEvent.location (top-left origin)
-            // bounds is also in top-left origin
-
-            // Check if click is outside the window bounds - if so, ignore it
             if clickLocation.x < bounds.origin.x ||
                clickLocation.x > bounds.origin.x + bounds.width ||
                clickLocation.y < bounds.origin.y ||
                clickLocation.y > bounds.origin.y + bounds.height {
-                // Click is outside window bounds - don't record it
                 print("ClickTrackerNew: Click at (\(clickLocation.x), \(clickLocation.y)) is outside window bounds \(bounds), ignoring")
                 pendingClickLocation = nil
                 return
             }
 
-            // Convert to window-relative coordinates (0,0 = top-left of window)
             finalX = clickLocation.x - bounds.origin.x
             finalY = clickLocation.y - bounds.origin.y
-
-            // Use window dimensions as reference
             refWidth = bounds.width
             refHeight = bounds.height
         } else {
@@ -159,8 +185,7 @@ class ClickTrackerNew {
             guard let screen = NSScreen.main else { return }
             let screenRect = screen.frame
 
-            // Ignore clicks in the menu bar area (where stop recording button is)
-            // Menu bar is at the top of the screen (y=0 to ~y=25-30 in top-left coordinates)
+            // Ignore clicks in the menu bar area
             let menuBarHeight: CGFloat = 30
             if clickLocation.y < menuBarHeight {
                 print("ClickTrackerNew: Click at (\(clickLocation.x), \(clickLocation.y)) is in menu bar area, ignoring")
@@ -168,8 +193,6 @@ class ClickTrackerNew {
                 return
             }
 
-            // Convert from CoreGraphics coordinates (top-left origin) to video coordinates (top-left origin)
-            // For full screen, CGEvent Y already matches video Y (both top-left origin)
             finalX = clickLocation.x
             finalY = clickLocation.y
             refWidth = screenRect.width
@@ -186,8 +209,6 @@ class ClickTrackerNew {
         )
 
         clickEvents.append(clickEvent)
-
-        // Clear pending click
         pendingClickLocation = nil
 
         // Notify callback

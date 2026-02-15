@@ -831,20 +831,30 @@ class MainViewController: NSViewController {
     // MARK: - Zoom Effect Actions
     @objc private func noZoomSelected() {
         zoomMode = .noZoom
+        syncZoomModeToAppDelegate()
         updateButtonStates()
         updateZoomButtonLabels()
     }
 
     @objc private func zoomOnClickSelected() {
         zoomMode = .zoomOnClick
+        syncZoomModeToAppDelegate()
         updateButtonStates()
         updateZoomButtonLabels()
     }
 
     @objc private func followCursorSelected() {
         zoomMode = .followCursor
+        syncZoomModeToAppDelegate()
         updateButtonStates()
         updateZoomButtonLabels()
+    }
+
+    private func syncZoomModeToAppDelegate() {
+        if let appDelegate = NSApp.delegate as? AppDelegate {
+            appDelegate.currentZoomMode = zoomMode.rawValue
+            UserDefaults.standard.set(zoomMode.rawValue, forKey: "zoomMode")
+        }
     }
 
     private func updateZoomButtonLabels() {
@@ -1353,11 +1363,15 @@ class MainViewController: NSViewController {
         // When all streams are ready, start writing simultaneously
         readyGroup.notify(queue: .main) { [weak self] in
             guard let self = self else { return }
+            // Reset recording start time to NOW — this is when video frames actually
+            // start being written (CMTime 0). Click/cursor Date() timestamps must be
+            // relative to this same moment for zoom timing to align with video time.
+            self.recordingStartTime = Date()
             self.screenRecorder?.beginWriting()
             if self.isSelfieEnabledFlag {
                 self.selfieCameraController.beginWriting()
             }
-            print("MainViewController: All streams ready — writing started (synchronized)")
+            print("MainViewController: All streams ready — writing started (synchronized), recordingStartTime reset")
         }
 
         // Start timer
