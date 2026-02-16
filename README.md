@@ -30,6 +30,18 @@ CaptureThis is a native macOS screen recording application built for creators wh
 
 Whether you're making tutorials, product demos, bug reports, or presentations, CaptureThis gives you a polished result straight out of the box.
 
+<p align="center">
+  <img src="app01.png" alt="CaptureThis - Main Window" width="600">
+  <br>
+  <em>Main control panel — choose recording mode, zoom, selfie camera, and microphone</em>
+</p>
+
+<p align="center">
+  <img src="app02.png" alt="CaptureThis - Video Editor" width="600">
+  <br>
+  <em>Built-in video editor — trim, customize, and export your recordings</em>
+</p>
+
 ## Features
 
 ### Screen Recording
