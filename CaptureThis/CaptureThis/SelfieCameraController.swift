@@ -1,5 +1,23 @@
 import Cocoa
 import AVFoundation
+import Vision
+import CoreImage
+
+enum VirtualBackgroundMode: Int, Codable {
+    case none = 0
+    case blurLight = 1
+    case blurMedium = 2
+    case blurStrong = 3
+    case solidColor = 4
+    case customImage = 5
+}
+
+struct VirtualBackgroundSettings: Codable {
+    var mode: VirtualBackgroundMode = .none
+    var colorHex: String? = nil
+    var imageBookmark: Data? = nil
+    var bundledImageIndex: Int? = nil
+}
 
 struct SelfieOverlayEvent: Codable {
     let time: TimeInterval
@@ -15,6 +33,7 @@ final class SelfieCameraController: NSObject {
         static let enabled = "selfieEnabled"
         static let selectedCameraID = "selfieCameraID"
         static let mirrored = "selfieMirrored"
+        static let virtualBackground = "selfieVirtualBackground"
     }
 
     private let captureSession = AVCaptureSession()
@@ -31,6 +50,15 @@ final class SelfieCameraController: NSObject {
 
     // Selected camera device (nil = default front camera)
     var selectedCameraDevice: AVCaptureDevice?
+
+    // Virtual background
+    private(set) var backgroundSettings = VirtualBackgroundSettings()
+    private var segmentationRequest: VNGeneratePersonSegmentationRequest?
+    private var sequenceHandler: VNSequenceRequestHandler?
+    private var backgroundCIImage: CIImage?
+    private var ciContext: CIContext?
+    private var pixelBufferPool: CVPixelBufferPool?
+    private var pixelBufferAdaptor: AVAssetWriterInputPixelBufferAdaptor?
 
     private var screenRecordingStartTime: Date?
     private var recordingBounds: CGRect = .zero
@@ -58,6 +86,7 @@ final class SelfieCameraController: NSObject {
         super.init()
         restoreSelectedCamera()
         restoreMirrorSetting()
+        restoreBackgroundSettings()
     }
 
     func setMirrored(_ mirrored: Bool) {
@@ -72,6 +101,98 @@ final class SelfieCameraController: NSObject {
             isMirrored = true
         } else {
             isMirrored = UserDefaults.standard.bool(forKey: DefaultsKey.mirrored)
+        }
+    }
+
+    // MARK: - Virtual Background
+
+    func setVirtualBackground(_ mode: VirtualBackgroundMode, colorHex: String? = nil, imageBookmark: Data? = nil, bundledImageIndex: Int? = nil) {
+        backgroundSettings.mode = mode
+        backgroundSettings.colorHex = colorHex
+        backgroundSettings.imageBookmark = bundledImageIndex != nil ? nil : imageBookmark
+        backgroundSettings.bundledImageIndex = imageBookmark != nil ? nil : bundledImageIndex
+
+        // Persist
+        if let data = try? JSONEncoder().encode(backgroundSettings) {
+            UserDefaults.standard.set(data, forKey: DefaultsKey.virtualBackground)
+        }
+
+        if mode != .none {
+            setupVisionResources()
+            if mode == .customImage {
+                if let index = bundledImageIndex,
+                   index >= 0, index < BundledBackgroundGenerator.backgrounds.count {
+                    let bg = BundledBackgroundGenerator.backgrounds[index]
+                    backgroundCIImage = bg.makeCIImage(CGSize(width: 1920, height: 1080))
+                } else if let bookmark = imageBookmark {
+                    backgroundCIImage = loadBackgroundImage(from: bookmark)
+                }
+            }
+        } else {
+            teardownVisionResources()
+        }
+
+        // Switch preview mode
+        DispatchQueue.main.async { [weak self] in
+            self?.updatePreviewMode()
+        }
+    }
+
+    private func restoreBackgroundSettings() {
+        guard let data = UserDefaults.standard.data(forKey: DefaultsKey.virtualBackground),
+              let settings = try? JSONDecoder().decode(VirtualBackgroundSettings.self, from: data) else { return }
+        backgroundSettings = settings
+        if settings.mode != .none {
+            setupVisionResources()
+            if settings.mode == .customImage {
+                if let index = settings.bundledImageIndex,
+                   index >= 0, index < BundledBackgroundGenerator.backgrounds.count {
+                    let bg = BundledBackgroundGenerator.backgrounds[index]
+                    backgroundCIImage = bg.makeCIImage(CGSize(width: 1920, height: 1080))
+                } else if let bookmark = settings.imageBookmark {
+                    backgroundCIImage = loadBackgroundImage(from: bookmark)
+                }
+            }
+        }
+    }
+
+    private func setupVisionResources() {
+        if segmentationRequest == nil {
+            let request = VNGeneratePersonSegmentationRequest()
+            request.qualityLevel = .balanced
+            request.outputPixelFormat = kCVPixelFormatType_OneComponent8
+            segmentationRequest = request
+        }
+        if sequenceHandler == nil {
+            sequenceHandler = VNSequenceRequestHandler()
+        }
+        if ciContext == nil {
+            ciContext = CIContext(options: [.useSoftwareRenderer: false])
+        }
+    }
+
+    private func teardownVisionResources() {
+        segmentationRequest = nil
+        sequenceHandler = nil
+        backgroundCIImage = nil
+        pixelBufferPool = nil
+    }
+
+    private func updatePreviewMode() {
+        guard let view = previewView else { return }
+        if backgroundSettings.mode != .none {
+            // Switch to CGImage-based display
+            view.setUseCustomDisplay(true)
+            if let previewLayer = view.previewLayer {
+                previewLayer.session = nil
+            }
+        } else {
+            // Switch back to preview layer
+            view.setUseCustomDisplay(false)
+            if captureSession.isRunning {
+                view.previewLayer?.session = captureSession
+                applyMirrorSetting()
+            }
         }
     }
 
@@ -273,6 +394,7 @@ final class SelfieCameraController: NSObject {
             }
             self.selfieWriter = nil
             self.selfieWriterInput = nil
+            self.pixelBufferAdaptor = nil
         }
     }
 
@@ -370,10 +492,8 @@ final class SelfieCameraController: NSObject {
         guard !captureSession.isRunning else { return }
         captureSession.startRunning()
 
-        if let previewLayer = previewView?.previewLayer {
-            previewLayer.session = captureSession
-            applyMirrorSetting()
-        }
+        updatePreviewMode()
+        applyMirrorSetting()
     }
 
     private func stopPreview() {
@@ -479,6 +599,117 @@ final class SelfieCameraController: NSObject {
         overlayEvents.append(event)
     }
 
+    // MARK: - Frame Processing
+
+    private func processFrame(_ pixelBuffer: CVPixelBuffer) -> CVPixelBuffer? {
+        guard backgroundSettings.mode != .none else { return nil }
+        guard let request = segmentationRequest, let handler = sequenceHandler else { return nil }
+
+        let width = CVPixelBufferGetWidth(pixelBuffer)
+        let height = CVPixelBufferGetHeight(pixelBuffer)
+
+        // Run person segmentation
+        do {
+            try handler.perform([request], on: pixelBuffer)
+        } catch {
+            return nil
+        }
+
+        guard let maskPixelBuffer = request.results?.first?.pixelBuffer else { return nil }
+
+        let ciImage = CIImage(cvPixelBuffer: pixelBuffer)
+        let maskImage = CIImage(cvPixelBuffer: maskPixelBuffer)
+
+        // Scale mask to match frame size
+        let maskWidth = CVPixelBufferGetWidth(maskPixelBuffer)
+        let maskHeight = CVPixelBufferGetHeight(maskPixelBuffer)
+        let scaleX = CGFloat(width) / CGFloat(maskWidth)
+        let scaleY = CGFloat(height) / CGFloat(maskHeight)
+        let scaledMask = maskImage.transformed(by: CGAffineTransform(scaleX: scaleX, y: scaleY))
+
+        // Create background based on mode
+        let background: CIImage
+        switch backgroundSettings.mode {
+        case .none:
+            return nil
+        case .blurLight:
+            background = ciImage.clampedToExtent().applyingGaussianBlur(sigma: 8).cropped(to: ciImage.extent)
+        case .blurMedium:
+            background = ciImage.clampedToExtent().applyingGaussianBlur(sigma: 20).cropped(to: ciImage.extent)
+        case .blurStrong:
+            background = ciImage.clampedToExtent().applyingGaussianBlur(sigma: 40).cropped(to: ciImage.extent)
+        case .solidColor:
+            let hex = backgroundSettings.colorHex ?? "007AFF"
+            let ciColor = CIColor(hexString: hex)
+            background = CIImage(color: ciColor).cropped(to: ciImage.extent)
+        case .customImage:
+            if let bgImage = backgroundCIImage {
+                // Scale custom image to fill frame
+                let bgScaleX = CGFloat(width) / bgImage.extent.width
+                let bgScaleY = CGFloat(height) / bgImage.extent.height
+                let bgScale = max(bgScaleX, bgScaleY)
+                let scaled = bgImage.transformed(by: CGAffineTransform(scaleX: bgScale, y: bgScale))
+                // Center crop
+                let offsetX = (scaled.extent.width - CGFloat(width)) / 2
+                let offsetY = (scaled.extent.height - CGFloat(height)) / 2
+                background = scaled.cropped(to: CGRect(x: scaled.extent.origin.x + offsetX,
+                                                        y: scaled.extent.origin.y + offsetY,
+                                                        width: CGFloat(width),
+                                                        height: CGFloat(height)))
+                    .transformed(by: CGAffineTransform(translationX: -offsetX, y: -offsetY))
+            } else {
+                background = ciImage.clampedToExtent().applyingGaussianBlur(sigma: 20).cropped(to: ciImage.extent)
+            }
+        }
+
+        // Composite: person over background using mask
+        guard let blendFilter = CIFilter(name: "CIBlendWithMask") else { return nil }
+        blendFilter.setValue(ciImage, forKey: kCIInputImageKey)
+        blendFilter.setValue(background, forKey: kCIInputBackgroundImageKey)
+        blendFilter.setValue(scaledMask, forKey: kCIInputMaskImageKey)
+
+        guard let outputImage = blendFilter.outputImage else { return nil }
+        guard let ctx = ciContext else { return nil }
+
+        // Get or create pixel buffer pool
+        let outputBuffer = createPixelBuffer(width: width, height: height)
+        guard let resultBuffer = outputBuffer else { return nil }
+
+        ctx.render(outputImage, to: resultBuffer)
+        return resultBuffer
+    }
+
+    private func createPixelBuffer(width: Int, height: Int) -> CVPixelBuffer? {
+        // Reuse pool if dimensions match
+        if let pool = pixelBufferPool {
+            var buffer: CVPixelBuffer?
+            let status = CVPixelBufferPoolCreatePixelBuffer(kCFAllocatorDefault, pool, &buffer)
+            if status == kCVReturnSuccess, let buf = buffer {
+                return buf
+            }
+        }
+
+        // Create new pool
+        let poolAttributes: [String: Any] = [
+            kCVPixelBufferPoolMinimumBufferCountKey as String: 3
+        ]
+        let pixelBufferAttributes: [String: Any] = [
+            kCVPixelBufferPixelFormatTypeKey as String: kCVPixelFormatType_32BGRA,
+            kCVPixelBufferWidthKey as String: width,
+            kCVPixelBufferHeightKey as String: height,
+            kCVPixelBufferIOSurfacePropertiesKey as String: [:] as [String: Any]
+        ]
+
+        var pool: CVPixelBufferPool?
+        CVPixelBufferPoolCreate(kCFAllocatorDefault, poolAttributes as CFDictionary, pixelBufferAttributes as CFDictionary, &pool)
+        pixelBufferPool = pool
+
+        guard let newPool = pool else { return nil }
+        var buffer: CVPixelBuffer?
+        CVPixelBufferPoolCreatePixelBuffer(kCFAllocatorDefault, newPool, &buffer)
+        return buffer
+    }
+
     private func saveWindowFrame() {
         guard let window = previewWindow else { return }
         UserDefaults.standard.set(NSStringFromRect(window.frame), forKey: DefaultsKey.windowFrame)
@@ -496,11 +727,29 @@ extension SelfieCameraController: AVCaptureVideoDataOutputSampleBufferDelegate {
             DispatchQueue.main.async { callback?() }
         }
 
-        guard isRecording, isWritingEnabled else { return }
-        guard let writer = selfieWriter else { return }
         guard CMSampleBufferDataIsReady(sampleBuffer) else { return }
 
-        // Pause handling — skip frames during pause, adjust timestamps on resume
+        // Process frame through virtual background pipeline if active
+        guard let sourceBuffer = CMSampleBufferGetImageBuffer(sampleBuffer) else { return }
+        let isVirtualBG = backgroundSettings.mode != .none
+        let processedBuffer: CVPixelBuffer? = isVirtualBG ? processFrame(sourceBuffer) : nil
+        let displayBuffer = processedBuffer ?? sourceBuffer
+
+        // Update preview with processed frame (only when using virtual background)
+        if isVirtualBG, let ctx = ciContext {
+            let ciImg = CIImage(cvPixelBuffer: displayBuffer)
+            if let cgImg = ctx.createCGImage(ciImg, from: ciImg.extent) {
+                DispatchQueue.main.async { [weak self] in
+                    self?.previewView?.updateFrame(cgImg)
+                }
+            }
+        }
+
+        // Recording logic
+        guard isRecording, isWritingEnabled else { return }
+        guard let writer = selfieWriter else { return }
+
+        // Pause handling
         if isPaused {
             if pauseStartTime == nil, selfieFirstSampleTime != nil {
                 pauseStartTime = CMSampleBufferGetPresentationTimeStamp(sampleBuffer)
@@ -515,15 +764,15 @@ extension SelfieCameraController: AVCaptureVideoDataOutputSampleBufferDelegate {
             print("SelfieCameraController: Pause ended. Gap: \(CMTimeGetSeconds(pauseDuration))s, Total paused: \(CMTimeGetSeconds(totalPausedDuration))s")
         }
 
-        // Initialize writer input on first writable frame (needs format info from the sample)
+        // Initialize writer input on first writable frame
         if selfieWriterInput == nil {
-            guard let formatDescription = CMSampleBufferGetFormatDescription(sampleBuffer) else { return }
-            let dimensions = CMVideoFormatDescriptionGetDimensions(formatDescription)
+            let width = CVPixelBufferGetWidth(displayBuffer)
+            let height = CVPixelBufferGetHeight(displayBuffer)
 
             let videoSettings: [String: Any] = [
                 AVVideoCodecKey: AVVideoCodecType.h264,
-                AVVideoWidthKey: Int(dimensions.width),
-                AVVideoHeightKey: Int(dimensions.height),
+                AVVideoWidthKey: width,
+                AVVideoHeightKey: height,
                 AVVideoCompressionPropertiesKey: [
                     AVVideoAverageBitRateKey: 5_000_000
                 ]
@@ -532,12 +781,23 @@ extension SelfieCameraController: AVCaptureVideoDataOutputSampleBufferDelegate {
             let input = AVAssetWriterInput(mediaType: .video, outputSettings: videoSettings)
             input.expectsMediaDataInRealTime = true
 
+            let adaptorAttributes: [String: Any] = [
+                kCVPixelBufferPixelFormatTypeKey as String: kCVPixelFormatType_32BGRA,
+                kCVPixelBufferWidthKey as String: width,
+                kCVPixelBufferHeightKey as String: height
+            ]
+            let adaptor = AVAssetWriterInputPixelBufferAdaptor(
+                assetWriterInput: input,
+                sourcePixelBufferAttributes: adaptorAttributes
+            )
+
             guard writer.canAdd(input) else {
                 print("SelfieCameraController: Cannot add writer input")
                 return
             }
             writer.add(input)
             selfieWriterInput = input
+            pixelBufferAdaptor = adaptor
         }
 
         // Start writer on first frame
@@ -553,26 +813,31 @@ extension SelfieCameraController: AVCaptureVideoDataOutputSampleBufferDelegate {
         guard let firstTime = selfieFirstSampleTime else { return }
         guard let writerInput = selfieWriterInput, writerInput.isReadyForMoreMediaData else { return }
 
-        // Normalize timestamp to 0-based, minus paused duration
+        // Normalize timestamp
         let pts = CMSampleBufferGetPresentationTimeStamp(sampleBuffer)
         let adjustedTime = CMTimeSubtract(CMTimeSubtract(pts, firstTime), totalPausedDuration)
 
-        var timingInfo = CMSampleTimingInfo(
-            duration: CMSampleBufferGetDuration(sampleBuffer),
-            presentationTimeStamp: adjustedTime,
-            decodeTimeStamp: .invalid
-        )
-        var adjustedBuffer: CMSampleBuffer?
-        CMSampleBufferCreateCopyWithNewTiming(
-            allocator: kCFAllocatorDefault,
-            sampleBuffer: sampleBuffer,
-            sampleTimingEntryCount: 1,
-            sampleTimingArray: &timingInfo,
-            sampleBufferOut: &adjustedBuffer
-        )
-
-        if let buf = adjustedBuffer {
-            writerInput.append(buf)
+        if isVirtualBG, let adaptor = pixelBufferAdaptor {
+            // Use pixel buffer adaptor for processed frames
+            adaptor.append(displayBuffer, withPresentationTime: adjustedTime)
+        } else {
+            // Use sample buffer for unprocessed frames
+            var timingInfo = CMSampleTimingInfo(
+                duration: CMSampleBufferGetDuration(sampleBuffer),
+                presentationTimeStamp: adjustedTime,
+                decodeTimeStamp: .invalid
+            )
+            var adjustedBuffer: CMSampleBuffer?
+            CMSampleBufferCreateCopyWithNewTiming(
+                allocator: kCFAllocatorDefault,
+                sampleBuffer: sampleBuffer,
+                sampleTimingEntryCount: 1,
+                sampleTimingArray: &timingInfo,
+                sampleBufferOut: &adjustedBuffer
+            )
+            if let buf = adjustedBuffer {
+                writerInput.append(buf)
+            }
         }
     }
 }
@@ -596,6 +861,8 @@ extension SelfieCameraController: NSWindowDelegate {
 
 final class SelfiePreviewView: NSView {
     private(set) var previewLayer: AVCaptureVideoPreviewLayer?
+    private var displayLayer: CALayer?
+    private var useCustomDisplay = false
 
     override init(frame frameRect: NSRect) {
         super.init(frame: frameRect)
@@ -604,18 +871,90 @@ final class SelfiePreviewView: NSView {
         layer?.cornerRadius = 14
         layer?.masksToBounds = true
 
-        let layer = AVCaptureVideoPreviewLayer()
-        layer.videoGravity = .resizeAspectFill
-        previewLayer = layer
-        self.layer?.addSublayer(layer)
+        let preview = AVCaptureVideoPreviewLayer()
+        preview.videoGravity = .resizeAspectFill
+        previewLayer = preview
+        self.layer?.addSublayer(preview)
+
+        let display = CALayer()
+        display.contentsGravity = .resizeAspectFill
+        display.isHidden = true
+        displayLayer = display
+        self.layer?.addSublayer(display)
     }
 
     required init?(coder: NSCoder) {
         fatalError("init(coder:) has not been implemented")
     }
 
+    func setUseCustomDisplay(_ custom: Bool) {
+        useCustomDisplay = custom
+        previewLayer?.isHidden = custom
+        displayLayer?.isHidden = !custom
+    }
+
+    func updateFrame(_ cgImage: CGImage) {
+        displayLayer?.contents = cgImage
+    }
+
     override func layout() {
         super.layout()
         previewLayer?.frame = bounds
+        displayLayer?.frame = bounds
+    }
+}
+
+// MARK: - Color Hex Helpers
+
+extension NSColor {
+    func toHex() -> String {
+        guard let rgb = usingColorSpace(.sRGB) else { return "000000" }
+        let r = Int(round(rgb.redComponent * 255))
+        let g = Int(round(rgb.greenComponent * 255))
+        let b = Int(round(rgb.blueComponent * 255))
+        return String(format: "%02X%02X%02X", r, g, b)
+    }
+
+    convenience init(hex: String) {
+        let hex = hex.trimmingCharacters(in: CharacterSet.alphanumerics.inverted)
+        var int: UInt64 = 0
+        Scanner(string: hex).scanHexInt64(&int)
+        let r, g, b: UInt64
+        if hex.count == 6 {
+            (r, g, b) = ((int >> 16) & 0xFF, (int >> 8) & 0xFF, int & 0xFF)
+        } else {
+            (r, g, b) = (0, 0, 0)
+        }
+        self.init(srgbRed: CGFloat(r) / 255, green: CGFloat(g) / 255, blue: CGFloat(b) / 255, alpha: 1)
+    }
+}
+
+extension CIColor {
+    convenience init(hexString: String) {
+        let hex = hexString.trimmingCharacters(in: CharacterSet.alphanumerics.inverted)
+        var int: UInt64 = 0
+        Scanner(string: hex).scanHexInt64(&int)
+        let r, g, b: UInt64
+        if hex.count == 6 {
+            (r, g, b) = ((int >> 16) & 0xFF, (int >> 8) & 0xFF, int & 0xFF)
+        } else {
+            (r, g, b) = (0, 0, 0)
+        }
+        self.init(red: CGFloat(r) / 255, green: CGFloat(g) / 255, blue: CGFloat(b) / 255)
+    }
+}
+
+// MARK: - Security-Scoped Bookmark Helpers
+
+extension SelfieCameraController {
+    func loadBackgroundImage(from bookmark: Data) -> CIImage? {
+        var isStale = false
+        guard let url = try? URL(resolvingBookmarkData: bookmark,
+                                  options: .withSecurityScope,
+                                  relativeTo: nil,
+                                  bookmarkDataIsStale: &isStale) else { return nil }
+        guard url.startAccessingSecurityScopedResource() else { return nil }
+        defer { url.stopAccessingSecurityScopedResource() }
+        return CIImage(contentsOf: url)
     }
 }

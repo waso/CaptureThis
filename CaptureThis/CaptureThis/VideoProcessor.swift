@@ -21,6 +21,8 @@ class VideoProcessor {
         borderEnabled: Bool = false,
         borderWidth: CGFloat = 0,
         muteAudio: Bool = false,
+        cursorOverlayMode: CursorOverlayMode = .normal,
+        allClickEvents: [ClickEventNew] = [],
         progress: @escaping (Double) -> Void,
         completion: @escaping (Error?) -> Void
     ) {
@@ -147,8 +149,9 @@ class VideoProcessor {
         }
         let hasSelfie = selfieAsset != nil && !selfieOverlayEvents.isEmpty
 
-        // Use compositor for zoom, subtitles, borders, or selfie overlay
-        let needsCompositor = needsZoom || hasSubtitles || borderEnabled || hasSelfie
+        // Use compositor for zoom, subtitles, borders, selfie overlay, or cursor overlay
+        let needsCursorOverlay = cursorOverlayMode != .normal
+        let needsCompositor = needsZoom || hasSubtitles || borderEnabled || hasSelfie || needsCursorOverlay
 
         // Export the composition
         guard let exportSession = AVAssetExportSession(
@@ -194,7 +197,9 @@ class VideoProcessor {
                 backgroundColor: backgroundCIColor,
                 backgroundImage: backgroundCIImage,
                 borderEnabled: borderEnabled,
-                borderWidth: borderWidth
+                borderWidth: borderWidth,
+                cursorOverlayMode: cursorOverlayMode,
+                allClickEvents: allClickEvents
             )
             exportSession.videoComposition = videoComposition
 
@@ -283,7 +288,9 @@ class VideoProcessor {
         backgroundColor: CIColor? = nil,
         backgroundImage: CIImage? = nil,
         borderEnabled: Bool = false,
-        borderWidth: CGFloat = 0
+        borderWidth: CGFloat = 0,
+        cursorOverlayMode: CursorOverlayMode = .normal,
+        allClickEvents: [ClickEventNew] = []
     ) -> AVMutableVideoComposition {
         let videoComposition = AVMutableVideoComposition()
 
@@ -331,7 +338,9 @@ class VideoProcessor {
             backgroundImage: backgroundImage,
             borderEnabled: borderEnabled,
             borderWidth: borderWidth,
-            canvasSize: outputSize
+            canvasSize: outputSize,
+            cursorOverlayMode: cursorOverlayMode,
+            allClickEvents: allClickEvents
         )
         videoComposition.instructions = [instruction]
 
@@ -533,6 +542,9 @@ class ZoomVideoCompositor: NSObject, AVVideoCompositing {
         // Get the base image
         var ciImage = CIImage(cvPixelBuffer: finalPixelBuffer)
 
+        // Apply cursor overlay BEFORE zoom (cursor positions are in full-video coords)
+        ciImage = applyCursorOverlay(to: ciImage, instruction: instruction, currentTime: currentTime)
+
         // Apply zoom effect FIRST (before borders)
         ciImage = applyZoom(to: ciImage, with: zoomState, videoSize: instruction.videoSize)
 
@@ -681,6 +693,194 @@ class ZoomVideoCompositor: NSObject, AVVideoCompositing {
         let finalImage = translatedImage.cropped(to: outputRect)
 
         return finalImage
+    }
+
+    // MARK: - Cursor Overlay Rendering
+
+    private func applyCursorOverlay(to image: CIImage, instruction: ZoomCompositionInstruction, currentTime: CMTime) -> CIImage {
+        switch instruction.cursorOverlayMode {
+        case .normal:
+            return image
+        case .clickHighlight:
+            return applyClickHighlight(to: image, instruction: instruction, currentTime: currentTime)
+        case .bigPointer:
+            return applyBigPointer(to: image, instruction: instruction, currentTime: currentTime)
+        }
+    }
+
+    private func applyClickHighlight(to image: CIImage, instruction: ZoomCompositionInstruction, currentTime: CMTime) -> CIImage {
+        let currentTimeSeconds = CMTimeGetSeconds(currentTime)
+        let videoSize = instruction.videoSize
+        let highlightDuration: TimeInterval = 0.5
+        var result = image
+
+        for click in instruction.allClickEvents {
+            let clickTimeSeconds = click.captureTimestamp.timeIntervalSince(instruction.recordingStartTime)
+            let elapsed = currentTimeSeconds - clickTimeSeconds
+
+            guard elapsed >= 0 && elapsed < highlightDuration else { continue }
+
+            let progress = elapsed / highlightDuration
+            let radius = 10.0 + 50.0 * progress  // 10 -> 60 px
+
+            // Convert click coords to video coords (Y-flip: CIImage origin is bottom-left)
+            let cx = (click.x / click.screenWidth) * videoSize.width
+            let cy = videoSize.height - (click.y / click.screenHeight) * videoSize.height
+
+            // Solid black filled circle using radial gradient
+            let center = CIVector(x: cx, y: cy)
+            guard let gradient = CIFilter(name: "CIRadialGradient", parameters: [
+                "inputCenter": center,
+                "inputRadius0": 0.0,
+                "inputRadius1": radius,
+                "inputColor0": CIColor.black,
+                "inputColor1": CIColor.black
+            ])?.outputImage else { continue }
+
+            // Create a transparency mask: radial gradient from opaque to transparent
+            guard let mask = CIFilter(name: "CIRadialGradient", parameters: [
+                "inputCenter": center,
+                "inputRadius0": 0.0,
+                "inputRadius1": radius,
+                "inputColor0": CIColor.white,
+                "inputColor1": CIColor(red: 0, green: 0, blue: 0, alpha: 0)
+            ])?.outputImage else { continue }
+
+            let blackCircle = gradient.applyingFilter("CIBlendWithMask", parameters: [
+                kCIInputBackgroundImageKey: CIImage(color: CIColor.clear).cropped(to: image.extent),
+                kCIInputMaskImageKey: mask
+            ]).cropped(to: image.extent)
+
+            guard let composite = CIFilter(name: "CISourceOverCompositing") else { continue }
+            composite.setValue(blackCircle, forKey: kCIInputImageKey)
+            composite.setValue(result, forKey: kCIInputBackgroundImageKey)
+            if let output = composite.outputImage {
+                result = output.cropped(to: image.extent)
+            }
+        }
+
+        return result
+    }
+
+    // Cached big pointer image
+    private var _bigPointerImage: CIImage?
+    private let bigPointerLock = NSLock()
+
+    private func getBigPointerImage() -> CIImage? {
+        bigPointerLock.lock()
+        defer { bigPointerLock.unlock() }
+
+        if let cached = _bigPointerImage {
+            return cached
+        }
+
+        // Generate a cursor image programmatically (~2x the macOS default cursor)
+        let width: CGFloat = 36
+        let height: CGFloat = 48
+        let nsImage = NSImage(size: NSSize(width: width, height: height), flipped: true) { rect in
+            // Arrow shape (typical macOS cursor shape, scaled to fit)
+            let path = NSBezierPath()
+            path.move(to: NSPoint(x: 2, y: 1))
+            path.line(to: NSPoint(x: 2, y: 38))
+            path.line(to: NSPoint(x: 11, y: 30))
+            path.line(to: NSPoint(x: 19, y: 44))
+            path.line(to: NSPoint(x: 24, y: 42))
+            path.line(to: NSPoint(x: 16, y: 28))
+            path.line(to: NSPoint(x: 26, y: 28))
+            path.close()
+
+            // Black outline
+            NSColor.black.setStroke()
+            path.lineWidth = 3
+            path.stroke()
+
+            // White fill
+            NSColor.white.setFill()
+            path.fill()
+
+            return true
+        }
+
+        guard let cgImage = nsImage.cgImage(forProposedRect: nil, context: nil, hints: nil) else {
+            return nil
+        }
+
+        let ciImage = CIImage(cgImage: cgImage)
+        _bigPointerImage = ciImage
+        return ciImage
+    }
+
+    private func applyBigPointer(to image: CIImage, instruction: ZoomCompositionInstruction, currentTime: CMTime) -> CIImage {
+        let currentTimeSeconds = CMTimeGetSeconds(currentTime)
+        let videoSize = instruction.videoSize
+
+        // Find cursor position at current time via interpolation
+        let positions = instruction.cursorPositions
+        guard !positions.isEmpty else { return image }
+
+        // Find the two positions bracketing current time
+        var cursorX: CGFloat = 0
+        var cursorY: CGFloat = 0
+
+        let firstTimeOffset = positions[0].captureTimestamp.timeIntervalSince(instruction.recordingStartTime)
+        let lastTimeOffset = positions[positions.count - 1].captureTimestamp.timeIntervalSince(instruction.recordingStartTime)
+
+        if currentTimeSeconds <= firstTimeOffset {
+            // Before first position
+            cursorX = (positions[0].x / positions[0].screenWidth) * videoSize.width
+            cursorY = (positions[0].y / positions[0].screenHeight) * videoSize.height
+        } else if currentTimeSeconds >= lastTimeOffset {
+            // After last position
+            let last = positions[positions.count - 1]
+            cursorX = (last.x / last.screenWidth) * videoSize.width
+            cursorY = (last.y / last.screenHeight) * videoSize.height
+        } else {
+            // Interpolate between two positions using binary search
+            var lo = 0
+            var hi = positions.count - 1
+            while lo < hi - 1 {
+                let mid = (lo + hi) / 2
+                let midTime = positions[mid].captureTimestamp.timeIntervalSince(instruction.recordingStartTime)
+                if midTime <= currentTimeSeconds {
+                    lo = mid
+                } else {
+                    hi = mid
+                }
+            }
+
+            let posA = positions[lo]
+            let posB = positions[hi]
+            let timeA = posA.captureTimestamp.timeIntervalSince(instruction.recordingStartTime)
+            let timeB = posB.captureTimestamp.timeIntervalSince(instruction.recordingStartTime)
+            let t = (timeB > timeA) ? (currentTimeSeconds - timeA) / (timeB - timeA) : 0.0
+
+            let ax = (posA.x / posA.screenWidth) * videoSize.width
+            let ay = (posA.y / posA.screenHeight) * videoSize.height
+            let bx = (posB.x / posB.screenWidth) * videoSize.width
+            let by = (posB.y / posB.screenHeight) * videoSize.height
+
+            cursorX = ax + CGFloat(t) * (bx - ax)
+            cursorY = ay + CGFloat(t) * (by - ay)
+        }
+
+        guard let pointerImage = getBigPointerImage() else { return image }
+
+        // Position the pointer so its tip covers the real cursor exactly.
+        // The arrow tip is drawn at (2, 1) in flipped NSImage coords.
+        // In CIImage coords (bottom-left origin), the tip is at (2, height - 1).
+        // We want that tip point to land at (cursorX, cursorY).
+        let pointerExtent = pointerImage.extent
+        let tipX: CGFloat = 2  // tip X in CIImage coords
+        let tipY: CGFloat = pointerExtent.height - 1  // tip Y in CIImage coords (flipped from 1)
+        let tx = cursorX - tipX
+        let ty = cursorY - tipY
+        let positioned = pointerImage.transformed(by: CGAffineTransform(translationX: tx, y: ty))
+
+        guard let composite = CIFilter(name: "CISourceOverCompositing") else { return image }
+        composite.setValue(positioned, forKey: kCIInputImageKey)
+        composite.setValue(image, forKey: kCIInputBackgroundImageKey)
+
+        return composite.outputImage?.cropped(to: image.extent) ?? image
     }
 
     private func applyCanvasBackground(to image: CIImage, instruction: ZoomCompositionInstruction) -> CIImage {
@@ -941,6 +1141,8 @@ class ZoomCompositionInstruction: NSObject, AVVideoCompositionInstructionProtoco
     let borderEnabled: Bool
     let borderWidth: CGFloat
     let canvasSize: CGSize
+    let cursorOverlayMode: CursorOverlayMode
+    let allClickEvents: [ClickEventNew]
 
     init(
         trackID: CMPersistentTrackID,
@@ -962,7 +1164,9 @@ class ZoomCompositionInstruction: NSObject, AVVideoCompositionInstructionProtoco
         backgroundImage: CIImage? = nil,
         borderEnabled: Bool = false,
         borderWidth: CGFloat = 0,
-        canvasSize: CGSize
+        canvasSize: CGSize,
+        cursorOverlayMode: CursorOverlayMode = .normal,
+        allClickEvents: [ClickEventNew] = []
     ) {
         self.timeRange = timeRange
         self.sourceTrackID = sourceTrackID
@@ -983,6 +1187,8 @@ class ZoomCompositionInstruction: NSObject, AVVideoCompositionInstructionProtoco
         self.borderEnabled = borderEnabled
         self.borderWidth = borderWidth
         self.canvasSize = canvasSize
+        self.cursorOverlayMode = cursorOverlayMode
+        self.allClickEvents = allClickEvents
         super.init()
 
         // Only the main video track is required via composition.

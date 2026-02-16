@@ -1,5 +1,7 @@
 import Cocoa
 import AVFoundation
+import ImageIO
+import UniformTypeIdentifiers
 
 // Custom view for editor - allows resizing
 class EditorContainerView: NSView {
@@ -28,6 +30,7 @@ class EditorViewController: NSViewController {
     private var zoomModePopup: NSPopUpButton!
     private var bladeToolButton: NSButton!
     private var exportButton: NSButton!
+    private var exportGIFButton: NSButton!
     private var exportProgressIndicator: NSProgressIndicator!
     private var exitButton: NSButton!
     private var rightPanel: NSView!
@@ -56,6 +59,11 @@ class EditorViewController: NSViewController {
     private var trimStartTime: CMTime = .zero
     private var trimEndTime: CMTime = .zero
     private var timeObserverToken: Any?
+
+    // Cursor overlay mode
+    private var cursorOverlayMode: CursorOverlayMode = .normal
+    private var cursorModeLabel: NSTextField!
+    private var cursorModePopup: NSPopUpButton!
 
     // Zoom properties
     private var zoomMode: ZoomMode = .noZoom
@@ -104,13 +112,14 @@ class EditorViewController: NSViewController {
     private var useCustomBackgroundColor: Bool = false
     private var customBackgroundColor: NSColor = .black
 
-    init(videoURL: URL, clickEvents: [ClickEventNew] = [], cursorPositions: [CursorPositionNew]? = nil, recordingStartTime: Date = Date(), initialZoomMode: ZoomMode = .noZoom, recordingMode: RecordingMode = .fullScreen) {
+    init(videoURL: URL, clickEvents: [ClickEventNew] = [], cursorPositions: [CursorPositionNew]? = nil, recordingStartTime: Date = Date(), initialZoomMode: ZoomMode = .noZoom, recordingMode: RecordingMode = .fullScreen, cursorOverlayMode: CursorOverlayMode = .normal) {
         self.videoURL = videoURL
         self.clickEvents = clickEvents
         self.cursorPositions = cursorPositions
         self.recordingStartTime = recordingStartTime
         self.zoomMode = initialZoomMode
         self.recordingMode = recordingMode
+        self.cursorOverlayMode = cursorOverlayMode
         super.init(nibName: nil, bundle: nil)
     }
 
@@ -135,6 +144,7 @@ class EditorViewController: NSViewController {
         setupUI()
         loadSelfieOverlayData()
         zoomModePopup.selectItem(at: zoomMode.rawValue)
+        cursorModePopup.selectItem(at: cursorOverlayMode.rawValue)
         loadVideo()
     }
 
@@ -336,6 +346,18 @@ class EditorViewController: NSViewController {
         zoomModePopup.action = #selector(zoomModeChanged)
         rightPanel.addSubview(zoomModePopup)
 
+        // --- Cursor Mode section ---
+        cursorModeLabel = createLabel(text: "Cursor Mode", fontSize: 13, weight: .semibold, color: .white)
+        rightPanel.addSubview(cursorModeLabel)
+
+        cursorModePopup = NSPopUpButton()
+        cursorModePopup.addItem(withTitle: "Normal")
+        cursorModePopup.addItem(withTitle: "Click Highlight")
+        cursorModePopup.addItem(withTitle: "Big Pointer")
+        cursorModePopup.target = self
+        cursorModePopup.action = #selector(cursorModeChanged)
+        rightPanel.addSubview(cursorModePopup)
+
         // Export button - prominent call-to-action
         exportButton = NSButton()
         exportButton.bezelStyle = .regularSquare
@@ -365,6 +387,26 @@ class EditorViewController: NSViewController {
         exportProgressIndicator.maxValue = 100
         exportProgressIndicator.isHidden = true
         rightPanel.addSubview(exportProgressIndicator)
+
+        // Export as GIF button
+        exportGIFButton = NSButton()
+        exportGIFButton.bezelStyle = .regularSquare
+        exportGIFButton.target = self
+        exportGIFButton.action = #selector(exportAsGIF)
+        exportGIFButton.wantsLayer = true
+        exportGIFButton.layer?.cornerRadius = 8
+        exportGIFButton.layer?.backgroundColor = NSColor(white: 0.25, alpha: 1.0).cgColor
+        exportGIFButton.isBordered = false
+
+        let gifTitle = NSAttributedString(
+            string: "Export as GIF",
+            attributes: [
+                .foregroundColor: NSColor.white,
+                .font: NSFont.systemFont(ofSize: 14, weight: .semibold)
+            ]
+        )
+        exportGIFButton.attributedTitle = gifTitle
+        rightPanel.addSubview(exportGIFButton)
 
         // Exit button - explicit quit option
         exitButton = NSButton()
@@ -397,8 +439,9 @@ class EditorViewController: NSViewController {
         [playerView, previewInteractionView, playPauseButton, timelineView,
          selfieToggle, selfieSectionLabel,
          audioToggle, audioSectionLabel,
-         zoomModeLabel, zoomModePopup, bladeToolButton,
-         exportButton, exportProgressIndicator, exitButton, rightPanel, rightPanelTitle,
+         zoomModeLabel, zoomModePopup,
+         cursorModeLabel, cursorModePopup, bladeToolButton,
+         exportButton, exportGIFButton, exportProgressIndicator, exitButton, rightPanel, rightPanelTitle,
          backgroundSectionLabel, colorsLabel, colorsStackRow1, colorsStackRow2,
          imagesLabel, imagesStackRow1, imagesStackRow2, imagesStackRow3,
          borderToggle, borderSectionDivider, borderSectionLabel, borderWidthLabel, borderWidthSlider].forEach {
@@ -527,16 +570,30 @@ class EditorViewController: NSViewController {
             zoomModePopup.centerYAnchor.constraint(equalTo: zoomModeLabel.centerYAnchor),
             zoomModePopup.widthAnchor.constraint(equalToConstant: 150),
 
+            // --- Cursor Mode section ---
+            cursorModeLabel.leadingAnchor.constraint(equalTo: rightPanel.leadingAnchor, constant: 16),
+            cursorModeLabel.topAnchor.constraint(equalTo: zoomModeLabel.bottomAnchor, constant: 14),
+
+            cursorModePopup.trailingAnchor.constraint(equalTo: rightPanel.trailingAnchor, constant: -16),
+            cursorModePopup.centerYAnchor.constraint(equalTo: cursorModeLabel.centerYAnchor),
+            cursorModePopup.widthAnchor.constraint(equalToConstant: 150),
+
             // Exit button - right panel, very bottom
             exitButton.leadingAnchor.constraint(equalTo: rightPanel.leadingAnchor, constant: 16),
             exitButton.trailingAnchor.constraint(equalTo: rightPanel.trailingAnchor, constant: -16),
             exitButton.bottomAnchor.constraint(equalTo: rightPanel.bottomAnchor, constant: -16),
             exitButton.heightAnchor.constraint(equalToConstant: 36),
 
-            // Export button - right panel, above exit button (prominent size)
+            // Export GIF button - right panel, above exit button
+            exportGIFButton.leadingAnchor.constraint(equalTo: rightPanel.leadingAnchor, constant: 16),
+            exportGIFButton.trailingAnchor.constraint(equalTo: rightPanel.trailingAnchor, constant: -16),
+            exportGIFButton.bottomAnchor.constraint(equalTo: exitButton.topAnchor, constant: -10),
+            exportGIFButton.heightAnchor.constraint(equalToConstant: 36),
+
+            // Export button - right panel, above GIF button (prominent size)
             exportButton.leadingAnchor.constraint(equalTo: rightPanel.leadingAnchor, constant: 16),
             exportButton.trailingAnchor.constraint(equalTo: rightPanel.trailingAnchor, constant: -16),
-            exportButton.bottomAnchor.constraint(equalTo: exitButton.topAnchor, constant: -10),
+            exportButton.bottomAnchor.constraint(equalTo: exportGIFButton.topAnchor, constant: -10),
             exportButton.heightAnchor.constraint(equalToConstant: 52),
 
             // Export progress - right panel, above export button
@@ -921,7 +978,7 @@ class EditorViewController: NSViewController {
     private func updatePreviewComposition() {
         guard let playerItem = player?.currentItem else { return }
 
-        if zoomMode == .noZoom && !borderEnabled {
+        if zoomMode == .noZoom && !borderEnabled && cursorOverlayMode == .normal {
             playerItem.videoComposition = nil
             return
         }
@@ -1016,7 +1073,9 @@ class EditorViewController: NSViewController {
             backgroundImage: backgroundImage,
             borderEnabled: borderEnabled,
             borderWidth: borderWidth,
-            canvasSize: canvasSize
+            canvasSize: canvasSize,
+            cursorOverlayMode: cursorOverlayMode,
+            allClickEvents: clickEvents
         )
 
         videoComposition.instructions = [instruction]
@@ -1139,6 +1198,12 @@ class EditorViewController: NSViewController {
         setupTimelineMarkers()
     }
 
+    @objc private func cursorModeChanged() {
+        cursorOverlayMode = CursorOverlayMode(rawValue: cursorModePopup.indexOfSelectedItem) ?? .normal
+        print("EditorViewController: Cursor overlay mode changed to \(cursorOverlayMode)")
+        updatePreviewComposition()
+    }
+
     @objc private func toggleBladeTool() {
         // Toggle blade tool state
         timelineView.isBladeToolActive = (bladeToolButton.state == .on)
@@ -1192,7 +1257,8 @@ class EditorViewController: NSViewController {
         let needsZoomProcessing = zoomMode != .noZoom
         let needsBorders = borderEnabled
         let needsSelfieOverlay = selfieOverlayEnabled && !selfieOverlayEvents.isEmpty && selfieVideoURL != nil
-        let needsVideoProcessor = needsZoomProcessing || needsBorders || needsSelfieOverlay
+        let needsCursorOverlay = cursorOverlayMode != .normal
+        let needsVideoProcessor = needsZoomProcessing || needsBorders || needsSelfieOverlay || needsCursorOverlay
 
         print("EditorViewController: Export - zoomMode: \(zoomMode), clickEvents: \(clickEvents.count), cursorPositions: \(cursorPositions?.count ?? 0)")
         print("EditorViewController: Export decision - needsZoom: \(needsZoomProcessing), needsBorders: \(needsBorders), using VideoProcessor: \(needsVideoProcessor)")
@@ -1246,6 +1312,167 @@ class EditorViewController: NSViewController {
                     alert.runModal()
                 }
             }
+            }
+        }
+    }
+
+    @objc private func exportAsGIF() {
+        print("EditorViewController: Export GIF button clicked")
+
+        guard let asset = videoAsset else {
+            showError("No video loaded")
+            return
+        }
+
+        // Check trimmed duration
+        let startSeconds = CMTimeGetSeconds(trimStartTime)
+        let endSeconds = CMTimeGetSeconds(trimEndTime)
+        let duration = endSeconds - startSeconds
+
+        if duration > 30 {
+            let alert = NSAlert()
+            alert.messageText = "Long GIF Warning"
+            alert.informativeText = "The selected range is \(Int(duration)) seconds. GIFs longer than 30 seconds can be very large. Continue anyway?"
+            alert.alertStyle = .warning
+            alert.addButton(withTitle: "Continue")
+            alert.addButton(withTitle: "Cancel")
+            if alert.runModal() != .alertFirstButtonReturn {
+                return
+            }
+        }
+
+        // Pause playback
+        player?.pause()
+        updatePlayPauseButton(isPlaying: false)
+
+        // Show progress
+        exportProgressIndicator.isHidden = false
+        exportProgressIndicator.doubleValue = 0
+        exportGIFButton.isEnabled = false
+        exportButton.isEnabled = false
+
+        // Generate output filename
+        let dateFormatter = DateFormatter()
+        dateFormatter.dateFormat = "yyyyMMdd-HHmmss"
+        let timestamp = dateFormatter.string(from: Date())
+        let filename = "vibe-recording-\(timestamp).gif"
+
+        let documentsPath = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask).first!
+        let outputURL = documentsPath.appendingPathComponent(filename)
+
+        // Remove existing file if it exists
+        if FileManager.default.fileExists(atPath: outputURL.path) {
+            try? FileManager.default.removeItem(at: outputURL)
+        }
+
+        DispatchQueue.global(qos: .userInitiated).async { [weak self] in
+            guard let self = self else { return }
+
+            let fps: Double = 15
+            let frameDelay = 1.0 / fps
+            let totalFrames = Int(duration * fps)
+
+            guard totalFrames > 0 else {
+                DispatchQueue.main.async {
+                    self.exportProgressIndicator.isHidden = true
+                    self.exportGIFButton.isEnabled = true
+                    self.exportButton.isEnabled = true
+                    self.showError("No frames to export")
+                }
+                return
+            }
+
+            // Create image generator
+            let generator = AVAssetImageGenerator(asset: asset)
+            generator.requestedTimeToleranceBefore = .zero
+            generator.requestedTimeToleranceAfter = .zero
+            generator.appliesPreferredTrackTransform = true
+
+            // Calculate frame times
+            var frameTimes: [CMTime] = []
+            for i in 0..<totalFrames {
+                let time = startSeconds + Double(i) * frameDelay
+                frameTimes.append(CMTime(seconds: time, preferredTimescale: 600))
+            }
+
+            // Scale to 50% of video dimensions (logical screen size for Retina displays)
+            if let track = asset.tracks(withMediaType: .video).first {
+                let size = track.naturalSize
+                generator.maximumSize = CGSize(width: size.width / 2.0, height: size.height / 2.0)
+            }
+
+            // Extract frames
+            var cgImages: [CGImage] = []
+            for (index, time) in frameTimes.enumerated() {
+                do {
+                    let cgImage = try generator.copyCGImage(at: time, actualTime: nil)
+                    cgImages.append(cgImage)
+                } catch {
+                    print("EditorViewController: Failed to extract frame \(index): \(error)")
+                }
+
+                // Update progress
+                let progress = Double(index + 1) / Double(totalFrames) * 80.0
+                DispatchQueue.main.async {
+                    self.exportProgressIndicator.doubleValue = progress
+                }
+            }
+
+            guard !cgImages.isEmpty else {
+                DispatchQueue.main.async {
+                    self.exportProgressIndicator.isHidden = true
+                    self.exportGIFButton.isEnabled = true
+                    self.exportButton.isEnabled = true
+                    self.showError("Failed to extract any frames")
+                }
+                return
+            }
+
+            // Write animated GIF
+            let gifProperties = [kCGImagePropertyGIFDictionary: [kCGImagePropertyGIFLoopCount: 0]] as CFDictionary
+            let frameProperties = [kCGImagePropertyGIFDictionary: [kCGImagePropertyGIFDelayTime: frameDelay]] as CFDictionary
+
+            guard let destination = CGImageDestinationCreateWithURL(outputURL as CFURL, UTType.gif.identifier as CFString, cgImages.count, nil) else {
+                DispatchQueue.main.async {
+                    self.exportProgressIndicator.isHidden = true
+                    self.exportGIFButton.isEnabled = true
+                    self.exportButton.isEnabled = true
+                    self.showError("Failed to create GIF file")
+                }
+                return
+            }
+
+            CGImageDestinationSetProperties(destination, gifProperties)
+
+            for (index, image) in cgImages.enumerated() {
+                CGImageDestinationAddImage(destination, image, frameProperties)
+
+                let progress = 80.0 + (Double(index + 1) / Double(cgImages.count) * 20.0)
+                DispatchQueue.main.async {
+                    self.exportProgressIndicator.doubleValue = progress
+                }
+            }
+
+            let success = CGImageDestinationFinalize(destination)
+
+            DispatchQueue.main.async {
+                self.exportProgressIndicator.isHidden = true
+                self.exportProgressIndicator.doubleValue = 0
+                self.exportGIFButton.isEnabled = true
+                self.exportButton.isEnabled = true
+
+                if success {
+                    // Reveal in Finder
+                    NSWorkspace.shared.activateFileViewerSelecting([outputURL])
+
+                    let alert = NSAlert()
+                    alert.messageText = "GIF Export Complete!"
+                    alert.informativeText = "Saved to \(outputURL.lastPathComponent)"
+                    alert.alertStyle = .informational
+                    alert.runModal()
+                } else {
+                    self.showError("Failed to write GIF file")
+                }
             }
         }
     }
@@ -1442,6 +1669,8 @@ class EditorViewController: NSViewController {
             borderEnabled: borderEnabled,
             borderWidth: borderWidth,
             muteAudio: exportMuted,
+            cursorOverlayMode: cursorOverlayMode,
+            allClickEvents: clickEvents,
             progress: { [weak self] progress in
                 DispatchQueue.main.async {
                     self?.exportProgressIndicator.doubleValue = progress * 100

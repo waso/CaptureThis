@@ -21,6 +21,12 @@ enum RecordingMode: Int {
     case selectedWindow = 1
 }
 
+enum CursorOverlayMode: Int {
+    case normal = 0
+    case clickHighlight = 1
+    case bigPointer = 2
+}
+
 class MainViewController: NSViewController {
     // UI Elements
     private var closeButton: NSButton!
@@ -41,6 +47,9 @@ class MainViewController: NSViewController {
 
     // Microphone button - with mute/unmute and device selection
     private var microphoneButton: ButtonContainer!
+
+    // Cursor overlay mode button
+    private var cursorModeButton: ButtonContainer!
 
     private var leftSeparatorLine: NSView!
     private var middleSeparatorLine: NSView!
@@ -99,6 +108,7 @@ class MainViewController: NSViewController {
     private var clickCount: Int = 0
     private var zoomMode: ZoomMode = .noZoom  // Default to no zoom until compositor is fixed
     private var recordingMode: RecordingMode = .fullScreen
+    private var cursorOverlayMode: CursorOverlayMode = .normal
     private var selectedFPS: Int = 60
     private var selectedWindowID: CGWindowID?
     private var selectedWindowName: String?
@@ -139,7 +149,7 @@ class MainViewController: NSViewController {
 
     override func loadView() {
         // Create draggable main view with compact height for recording controls
-        let mainView = DraggableView(frame: NSRect(x: 0, y: 0, width: 1000, height: 300))
+        let mainView = DraggableView(frame: NSRect(x: 0, y: 0, width: 1190, height: 300))
         print("MainViewController: loadView - Created view with frame: \(mainView.frame)")
         mainView.translatesAutoresizingMaskIntoConstraints = true
         mainView.autoresizingMask = []
@@ -166,6 +176,9 @@ class MainViewController: NSViewController {
         // Restore microphone settings
         restoreMicrophoneSettings()
 
+        // Restore cursor overlay mode
+        cursorOverlayMode = CursorOverlayMode(rawValue: UserDefaults.standard.integer(forKey: "cursorOverlayMode")) ?? .normal
+
         // Restore selected display
         restoreSelectedDisplay()
 
@@ -173,6 +186,9 @@ class MainViewController: NSViewController {
 
         // Update microphone button state after UI is created
         updateMicrophoneButtonState()
+
+        // Update cursor mode button state after UI is created
+        updateCursorModeButtonState()
 
         // Debug: Print final microphone state
         print("MainViewController: viewDidLoad complete - isMicrophoneEnabled=\(isMicrophoneEnabled), selectedAudioDevice=\(selectedAudioDevice?.localizedName ?? "nil (will use default)")")
@@ -185,12 +201,12 @@ class MainViewController: NSViewController {
         if let window = view.window {
             print("MainViewController: viewDidAppear - Current window frame: \(window.frame)")
             let currentOrigin = window.frame.origin
-            window.setFrame(NSRect(x: currentOrigin.x, y: currentOrigin.y, width: 1000, height: 300), display: true)
+            window.setFrame(NSRect(x: currentOrigin.x, y: currentOrigin.y, width: 1190, height: 300), display: true)
             print("MainViewController: viewDidAppear - After setFrame: \(window.frame)")
 
             // Also set it again with a delay to override anything else
             DispatchQueue.main.asyncAfter(deadline: .now() + 0.1) {
-                window.setFrame(NSRect(x: currentOrigin.x, y: currentOrigin.y, width: 1000, height: 300), display: true)
+                window.setFrame(NSRect(x: currentOrigin.x, y: currentOrigin.y, width: 1190, height: 300), display: true)
                 print("MainViewController: viewDidAppear delayed - Final window frame: \(window.frame)")
             }
         }
@@ -287,6 +303,12 @@ class MainViewController: NSViewController {
         microphoneButton.button?.target = self
         microphoneButton.button?.action = #selector(microphoneButtonClicked)
         view.addSubview(microphoneButton)
+
+        // Cursor overlay mode button (click shows mode selection menu)
+        cursorModeButton = createModeButton(title: "↖", tooltip: "Cursor")
+        cursorModeButton.button?.target = self
+        cursorModeButton.button?.action = #selector(cursorModeButtonClicked)
+        view.addSubview(cursorModeButton)
 
         // Right separator line (after recording mode buttons)
         rightSeparatorLine = NSView()
@@ -574,7 +596,7 @@ class MainViewController: NSViewController {
     private func layoutViews() {
         [closeButton, leftSeparatorLine, resolutionPopup, separator2, fpsPopup, separator3,
          noZoomButton, zoomOnClickButton, followCursorButton, separator4,
-         fullScreenButton, selectedWindowButton, speechToTextButton, microphoneButton, rightSeparatorLine,
+         fullScreenButton, selectedWindowButton, speechToTextButton, microphoneButton, cursorModeButton, rightSeparatorLine,
          timerLabel, recordButton, stopButton, recordLabel, stopLabel, progressIndicator, completionLabel].forEach {
             $0?.translatesAutoresizingMaskIntoConstraints = false
         }
@@ -661,8 +683,14 @@ class MainViewController: NSViewController {
             microphoneButton.widthAnchor.constraint(equalToConstant: 80),
             microphoneButton.heightAnchor.constraint(equalToConstant: 80),
 
+            // Cursor overlay mode button (container with icon + label)
+            cursorModeButton.leadingAnchor.constraint(equalTo: microphoneButton.trailingAnchor, constant: 15),
+            cursorModeButton.centerYAnchor.constraint(equalTo: view.centerYAnchor),
+            cursorModeButton.widthAnchor.constraint(equalToConstant: 80),
+            cursorModeButton.heightAnchor.constraint(equalToConstant: 80),
+
             // Right separator line (after recording mode buttons) - with margins
-            rightSeparatorLine.leadingAnchor.constraint(equalTo: microphoneButton.trailingAnchor, constant: 12),
+            rightSeparatorLine.leadingAnchor.constraint(equalTo: cursorModeButton.trailingAnchor, constant: 12),
             rightSeparatorLine.topAnchor.constraint(equalTo: view.topAnchor, constant: 25),
             rightSeparatorLine.bottomAnchor.constraint(equalTo: view.bottomAnchor, constant: -25),
             rightSeparatorLine.widthAnchor.constraint(equalToConstant: 1),
@@ -1059,6 +1087,81 @@ class MainViewController: NSViewController {
         print("Selected audio device: \(device.localizedName)")
     }
 
+    // MARK: - Cursor Overlay Mode
+
+    @objc private func cursorModeButtonClicked() {
+        showCursorModeMenu()
+    }
+
+    private func showCursorModeMenu() {
+        guard let button = cursorModeButton.button else { return }
+
+        let menu = NSMenu()
+
+        let normalItem = NSMenuItem(title: "Normal (No Overlay)", action: #selector(selectCursorModeNormal), keyEquivalent: "")
+        normalItem.target = self
+        normalItem.state = cursorOverlayMode == .normal ? .on : .off
+        menu.addItem(normalItem)
+
+        let clickItem = NSMenuItem(title: "Click Highlight", action: #selector(selectCursorModeClickHighlight), keyEquivalent: "")
+        clickItem.target = self
+        clickItem.state = cursorOverlayMode == .clickHighlight ? .on : .off
+        menu.addItem(clickItem)
+
+        let pointerItem = NSMenuItem(title: "Big Pointer", action: #selector(selectCursorModeBigPointer), keyEquivalent: "")
+        pointerItem.target = self
+        pointerItem.state = cursorOverlayMode == .bigPointer ? .on : .off
+        menu.addItem(pointerItem)
+
+        let location = NSPoint(x: 0, y: button.bounds.height + 5)
+        menu.popUp(positioning: nil, at: location, in: button)
+    }
+
+    @objc private func selectCursorModeNormal() {
+        cursorOverlayMode = .normal
+        updateCursorModeButtonState()
+        saveCursorModePreference()
+    }
+
+    @objc private func selectCursorModeClickHighlight() {
+        cursorOverlayMode = .clickHighlight
+        updateCursorModeButtonState()
+        saveCursorModePreference()
+    }
+
+    @objc private func selectCursorModeBigPointer() {
+        cursorOverlayMode = .bigPointer
+        updateCursorModeButtonState()
+        saveCursorModePreference()
+    }
+
+    private func updateCursorModeButtonState() {
+        switch cursorOverlayMode {
+        case .normal:
+            cursorModeButton.label?.stringValue = "Normal"
+            cursorModeButton.button?.toolTip = "Cursor: Normal"
+            (cursorModeButton.button as? HoverButton)?.isSelected = false
+        case .clickHighlight:
+            cursorModeButton.label?.stringValue = "Highlight"
+            cursorModeButton.button?.toolTip = "Cursor: Click Highlight"
+            (cursorModeButton.button as? HoverButton)?.isSelected = true
+        case .bigPointer:
+            cursorModeButton.label?.stringValue = "Big Ptr"
+            cursorModeButton.button?.toolTip = "Cursor: Big Pointer"
+            (cursorModeButton.button as? HoverButton)?.isSelected = true
+        }
+    }
+
+    private func saveCursorModePreference() {
+        UserDefaults.standard.set(cursorOverlayMode.rawValue, forKey: "cursorOverlayMode")
+    }
+
+    func setCursorOverlayMode(_ mode: CursorOverlayMode) {
+        cursorOverlayMode = mode
+        updateCursorModeButtonState()
+        saveCursorModePreference()
+    }
+
     private func toggleMicrophoneDuringRecording() {
         guard isRecording, let recorder = screenRecorder else {
             print("MainViewController: Cannot toggle mic - not recording")
@@ -1418,7 +1521,7 @@ class MainViewController: NSViewController {
             window.alphaValue = 1.0
 
             // Resize it back to normal size
-            window.setFrame(NSRect(x: 0, y: 0, width: 1000, height: 300), display: true)
+            window.setFrame(NSRect(x: 0, y: 0, width: 1190, height: 300), display: true)
 
             // Move window back to center of screen
             window.center()
@@ -1560,7 +1663,8 @@ class MainViewController: NSViewController {
             cursorPositions: cursorPositions,
             recordingStartTime: startTime,
             initialZoomMode: zoomMode,
-            recordingMode: recordingMode
+            recordingMode: recordingMode,
+            cursorOverlayMode: cursorOverlayMode
         )
         editorWindowController.showWindow(nil)
 
@@ -3011,7 +3115,7 @@ class DraggableView: NSView {
     private var initialLocation: NSPoint?
 
     override var intrinsicContentSize: NSSize {
-        return NSSize(width: 1000, height: 300)
+        return NSSize(width: 1190, height: 300)
     }
 
     override func mouseDown(with event: NSEvent) {

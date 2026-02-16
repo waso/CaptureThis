@@ -1,5 +1,6 @@
 import Cocoa
 import AVFoundation
+import UniformTypeIdentifiers
 
 @main
 class AppDelegate: NSObject, NSApplicationDelegate {
@@ -18,9 +19,14 @@ class AppDelegate: NSObject, NSApplicationDelegate {
     var microphoneButton: HoverButton?  // Reference to microphone button
     var microphoneIconView: NSImageView?  // Reference to microphone icon
     var microphoneLabel: NSTextField?  // Reference to microphone label
+    var cursorButton: HoverButton?  // Reference to cursor mode button
+    var cursorIconView: NSImageView?  // Reference to cursor icon
+    var cursorLabel: NSTextField?  // Reference to cursor label
+    var currentCursorMode: Int = 0  // 0=Normal, 1=Click Highlight, 2=Big Pointer
     var zoomLabel: NSTextField?  // Reference to zoom label for updating text
     var recordingModeSelected: Bool = false  // Track if user has selected a recording mode
     var isFullScreenMode: Bool = true  // Track recording mode: true=full screen, false=selected window (default)
+    var backgroundPickerWindow: BackgroundImagePickerWindow?
 
     func applicationDidFinishLaunching(_ aNotification: Notification) {
         // SIMPLIFIED: Create a basic test window to verify sizing works
@@ -28,9 +34,12 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         // Load saved zoom mode preference
         currentZoomMode = UserDefaults.standard.integer(forKey: "zoomMode")
 
+        // Load saved cursor overlay mode preference
+        currentCursorMode = UserDefaults.standard.integer(forKey: "cursorOverlayMode")
+
         // Create simple window
         let window = NSWindow(
-            contentRect: NSRect(x: 0, y: 0, width: 700, height: 66),
+            contentRect: NSRect(x: 0, y: 0, width: 778, height: 66),
             styleMask: [.borderless, .fullSizeContentView],
             backing: .buffered,
             defer: false
@@ -45,7 +54,7 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         window.center()
 
         // Create simple draggable test view
-        let testView = SimpleDraggableView(frame: NSRect(x: 0, y: 0, width: 700, height: 66))
+        let testView = SimpleDraggableView(frame: NSRect(x: 0, y: 0, width: 778, height: 66))
         testView.wantsLayer = true
         testView.layer?.backgroundColor = NSColor(red: 0.15, green: 0.15, blue: 0.15, alpha: 1.0).cgColor
         testView.layer?.cornerRadius = 12
@@ -324,8 +333,54 @@ class AppDelegate: NSObject, NSApplicationDelegate {
 
         testView.addSubview(micContainer)
 
+        // Add Cursor mode button container with icon and label
+        let cursorContainer = PassThroughView(frame: NSRect(x: 478, y: 15, width: 70, height: 50))
+        cursorContainer.wantsLayer = true
+
+        let cursorBtn = HoverButton(normalColor: .clear,
+                                     hoverColor: NSColor(white: 0.25, alpha: 1.0),
+                                     selectedColor: NSColor(white: 0.25, alpha: 1.0))
+        cursorBtn.frame = NSRect(x: 0, y: -8, width: 70, height: 50)
+        cursorBtn.title = ""
+        cursorBtn.bezelStyle = .regularSquare
+        cursorBtn.isBordered = false
+        cursorBtn.wantsLayer = true
+        cursorBtn.layer?.backgroundColor = NSColor.clear.cgColor
+        cursorBtn.layer?.cornerRadius = 6
+        cursorBtn.target = self
+        cursorBtn.action = #selector(cursorModeButtonClicked(_:))
+        cursorContainer.addSubview(cursorBtn)
+        cursorButton = cursorBtn
+
+        if let cursorImage = NSImage(systemSymbolName: "cursorarrow.click.2", accessibilityDescription: "Cursor") {
+            cursorImage.isTemplate = true
+            let config = NSImage.SymbolConfiguration(pointSize: 20, weight: .regular)
+            let configuredImage = cursorImage.withSymbolConfiguration(config)
+
+            let iconView = PassThroughImageView(frame: NSRect(x: 0, y: 16, width: 70, height: 24))
+            iconView.image = configuredImage
+            iconView.imageScaling = .scaleProportionallyUpOrDown
+            iconView.contentTintColor = .white
+            cursorContainer.addSubview(iconView)
+            cursorIconView = iconView
+        }
+
+        let cursorLabelView = PassThroughTextField(labelWithString: "Normal")
+        cursorLabelView.font = NSFont.systemFont(ofSize: 10, weight: .regular)
+        cursorLabelView.textColor = NSColor(white: 0.6, alpha: 1.0)
+        cursorLabelView.alignment = .center
+        cursorLabelView.frame = NSRect(x: 0, y: -4, width: 70, height: 12)
+        cursorLabelView.isEditable = false
+        cursorLabelView.isSelectable = false
+        cursorLabelView.isBordered = false
+        cursorLabelView.backgroundColor = .clear
+        cursorContainer.addSubview(cursorLabelView)
+        cursorLabel = cursorLabelView
+
+        testView.addSubview(cursorContainer)
+
         // Add Record button container with icon and label
-        let recordContainer = PassThroughView(frame: NSRect(x: 618, y: 15, width: 70, height: 50))
+        let recordContainer = PassThroughView(frame: NSRect(x: 696, y: 15, width: 70, height: 50))
         recordContainer.wantsLayer = true
 
         // Create the record button with icon only (no text)
@@ -373,7 +428,7 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         testView.addSubview(recordContainer)
 
         // Add vertical separator line before record button
-        let separatorLine3 = NSView(frame: NSRect(x: 610, y: 8, width: 1, height: 50))
+        let separatorLine3 = NSView(frame: NSRect(x: 688, y: 8, width: 1, height: 50))
         separatorLine3.wantsLayer = true
         separatorLine3.layer?.backgroundColor = NSColor(white: 0.3, alpha: 1.0).cgColor
         testView.addSubview(separatorLine3)
@@ -422,6 +477,9 @@ class AppDelegate: NSObject, NSApplicationDelegate {
 
         // Sync microphone state
         updateMicrophoneButtonState()
+
+        // Sync cursor mode state
+        updateCursorButtonState()
 
         print("AppDelegate: Window shown with frame: \(window.frame)")
 
@@ -739,6 +797,51 @@ class AppDelegate: NSObject, NSApplicationDelegate {
             menu.addItem(item)
         }
 
+        // Virtual Background section
+        menu.addItem(NSMenuItem.separator())
+
+        let bgHeader = NSMenuItem(title: "Virtual Background:", action: nil, keyEquivalent: "")
+        bgHeader.isEnabled = false
+        menu.addItem(bgHeader)
+
+        let currentMode = mvc.selfieCameraController.backgroundSettings.mode
+
+        let noneItem = NSMenuItem(title: "No Background", action: #selector(selectVirtualBackground(_:)), keyEquivalent: "")
+        noneItem.target = self
+        noneItem.tag = VirtualBackgroundMode.none.rawValue
+        noneItem.state = currentMode == .none ? .on : .off
+        menu.addItem(noneItem)
+
+        let blurLightItem = NSMenuItem(title: "Blur - Light", action: #selector(selectVirtualBackground(_:)), keyEquivalent: "")
+        blurLightItem.target = self
+        blurLightItem.tag = VirtualBackgroundMode.blurLight.rawValue
+        blurLightItem.state = currentMode == .blurLight ? .on : .off
+        menu.addItem(blurLightItem)
+
+        let blurMedItem = NSMenuItem(title: "Blur - Medium", action: #selector(selectVirtualBackground(_:)), keyEquivalent: "")
+        blurMedItem.target = self
+        blurMedItem.tag = VirtualBackgroundMode.blurMedium.rawValue
+        blurMedItem.state = currentMode == .blurMedium ? .on : .off
+        menu.addItem(blurMedItem)
+
+        let blurStrongItem = NSMenuItem(title: "Blur - Strong", action: #selector(selectVirtualBackground(_:)), keyEquivalent: "")
+        blurStrongItem.target = self
+        blurStrongItem.tag = VirtualBackgroundMode.blurStrong.rawValue
+        blurStrongItem.state = currentMode == .blurStrong ? .on : .off
+        menu.addItem(blurStrongItem)
+
+        menu.addItem(NSMenuItem.separator())
+
+        let solidColorItem = NSMenuItem(title: "Solid Color...", action: #selector(selectSolidColorBackground), keyEquivalent: "")
+        solidColorItem.target = self
+        solidColorItem.state = currentMode == .solidColor ? .on : .off
+        menu.addItem(solidColorItem)
+
+        let customImageItem = NSMenuItem(title: "Custom Image...", action: #selector(selectCustomImageBackground), keyEquivalent: "")
+        customImageItem.target = self
+        customImageItem.state = currentMode == .customImage ? .on : .off
+        menu.addItem(customImageItem)
+
         // Show the menu below the button
         let location = NSPoint(x: 0, y: sender.bounds.height + 5)
         menu.popUp(positioning: nil, at: location, in: sender)
@@ -768,6 +871,76 @@ class AppDelegate: NSObject, NSApplicationDelegate {
 
         mvc.selfieCameraController.setSelectedCamera(camera)
         print("AppDelegate: Selected selfie camera: \(camera.localizedName)")
+    }
+
+    @objc private func selectVirtualBackground(_ sender: NSMenuItem) {
+        guard let mvc = mainViewController else { return }
+        guard let mode = VirtualBackgroundMode(rawValue: sender.tag) else { return }
+        mvc.selfieCameraController.setVirtualBackground(mode)
+        print("AppDelegate: Virtual background set to \(mode)")
+    }
+
+    @objc private func selectSolidColorBackground() {
+        guard let mvc = mainViewController else { return }
+
+        let colorPanel = NSColorPanel.shared
+        colorPanel.mode = .wheel
+        colorPanel.showsAlpha = false
+
+        // Set current color if already using solid color
+        if let hex = mvc.selfieCameraController.backgroundSettings.colorHex {
+            colorPanel.color = NSColor(hex: hex)
+        }
+
+        colorPanel.setTarget(self)
+        colorPanel.setAction(#selector(solidColorChanged(_:)))
+        colorPanel.makeKeyAndOrderFront(nil)
+
+        // Set solid color mode immediately with current color
+        let hex = colorPanel.color.toHex()
+        mvc.selfieCameraController.setVirtualBackground(.solidColor, colorHex: hex)
+    }
+
+    @objc private func solidColorChanged(_ sender: NSColorPanel) {
+        guard let mvc = mainViewController else { return }
+        let hex = sender.color.toHex()
+        mvc.selfieCameraController.setVirtualBackground(.solidColor, colorHex: hex)
+    }
+
+    @objc private func selectCustomImageBackground() {
+        guard let mvc = mainViewController else { return }
+
+        let settings = mvc.selfieCameraController.backgroundSettings
+        let picker = BackgroundImagePickerWindow(
+            currentMode: settings.mode,
+            currentBundledIndex: settings.bundledImageIndex,
+            currentBookmark: settings.imageBookmark
+        )
+        // Live preview — apply immediately on tile click
+        let applyBackground: (VirtualBackgroundMode, Data?, Int?) -> Void = { [weak self] mode, bookmark, bundledIndex in
+            guard let mvc = self?.mainViewController else { return }
+            if let bookmark = bookmark {
+                BackgroundImageBookmarkStore.addBookmark(bookmark)
+                mvc.selfieCameraController.setVirtualBackground(mode, imageBookmark: bookmark)
+            } else if let index = bundledIndex {
+                mvc.selfieCameraController.setVirtualBackground(mode, bundledImageIndex: index)
+            } else {
+                mvc.selfieCameraController.setVirtualBackground(mode)
+            }
+        }
+        picker.onPreviewBackground = applyBackground
+        // Save — preview already applied, just log
+        picker.onBackgroundSelected = { mode, bookmark, bundledIndex in
+            if let index = bundledIndex {
+                print("AppDelegate: Bundled background \(index) saved from picker")
+            } else if bookmark != nil {
+                print("AppDelegate: Custom background image saved from picker")
+            }
+        }
+        // Cancel — revert to original settings
+        picker.onCancelled = applyBackground
+        picker.makeKeyAndOrderFront(nil)
+        backgroundPickerWindow = picker
     }
 
     // MARK: - Microphone Actions
@@ -868,6 +1041,73 @@ class AppDelegate: NSObject, NSApplicationDelegate {
             microphoneLabel?.stringValue = displayName
         } else {
             microphoneLabel?.stringValue = "Mic Off"
+        }
+    }
+
+    // MARK: - Cursor Mode Actions
+    @objc private func cursorModeButtonClicked(_ sender: NSButton) {
+        showCursorModeMenu(sender)
+    }
+
+    private func showCursorModeMenu(_ sender: NSButton) {
+        let menu = NSMenu()
+        menu.font = NSFont.systemFont(ofSize: 11)
+
+        if #available(macOS 10.14, *) {
+            menu.appearance = NSAppearance(named: .darkAqua)
+        }
+
+        let normalItem = NSMenuItem(title: "Normal", action: #selector(cursorModeSelected(_:)), keyEquivalent: "")
+        normalItem.target = self
+        normalItem.tag = 0
+        normalItem.state = (currentCursorMode == 0) ? .on : .off
+        menu.addItem(normalItem)
+
+        let highlightItem = NSMenuItem(title: "Click Highlight", action: #selector(cursorModeSelected(_:)), keyEquivalent: "")
+        highlightItem.target = self
+        highlightItem.tag = 1
+        highlightItem.state = (currentCursorMode == 1) ? .on : .off
+        menu.addItem(highlightItem)
+
+        let bigPointerItem = NSMenuItem(title: "Big Pointer", action: #selector(cursorModeSelected(_:)), keyEquivalent: "")
+        bigPointerItem.target = self
+        bigPointerItem.tag = 2
+        bigPointerItem.state = (currentCursorMode == 2) ? .on : .off
+        menu.addItem(bigPointerItem)
+
+        let location = NSPoint(x: 0, y: sender.bounds.height + 5)
+        menu.popUp(positioning: nil, at: location, in: sender)
+    }
+
+    @objc private func cursorModeSelected(_ sender: NSMenuItem) {
+        currentCursorMode = sender.tag
+        UserDefaults.standard.set(currentCursorMode, forKey: "cursorOverlayMode")
+        updateCursorButtonState()
+
+        // Sync with MainViewController
+        if let mvc = mainViewController {
+            mvc.setCursorOverlayMode(CursorOverlayMode(rawValue: currentCursorMode) ?? .normal)
+        }
+
+        print("AppDelegate: Cursor mode selected: \(sender.title) (mode: \(currentCursorMode))")
+    }
+
+    private func updateCursorButtonState() {
+        let isActive = currentCursorMode != 0
+        cursorButton?.isSelected = isActive
+        cursorButton?.layer?.backgroundColor = isActive ?
+            NSColor(white: 0.25, alpha: 1.0).cgColor :
+            NSColor.clear.cgColor
+
+        switch currentCursorMode {
+        case 0:
+            cursorLabel?.stringValue = "Normal"
+        case 1:
+            cursorLabel?.stringValue = "Highlight"
+        case 2:
+            cursorLabel?.stringValue = "Big Ptr"
+        default:
+            cursorLabel?.stringValue = "Cursor"
         }
     }
 

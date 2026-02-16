@@ -5,7 +5,7 @@ class EditorWindowController: NSWindowController, NSWindowDelegate {
     private var editorViewController: EditorViewController?
     private let windowSize = NSSize(width: 1280, height: 800)
 
-    convenience init(videoURL: URL, clickEvents: [ClickEventNew] = [], cursorPositions: [CursorPositionNew]? = nil, recordingStartTime: Date = Date(), initialZoomMode: ZoomMode = .noZoom, recordingMode: RecordingMode = .fullScreen) {
+    convenience init(videoURL: URL, clickEvents: [ClickEventNew] = [], cursorPositions: [CursorPositionNew]? = nil, recordingStartTime: Date = Date(), initialZoomMode: ZoomMode = .noZoom, recordingMode: RecordingMode = .fullScreen, cursorOverlayMode: CursorOverlayMode = .normal) {
 
         // Clear any saved window frame for this app to prevent restoration
         UserDefaults.standard.removeObject(forKey: "NSWindow Frame CaptureThis Editor")
@@ -37,7 +37,8 @@ class EditorWindowController: NSWindowController, NSWindowDelegate {
             cursorPositions: cursorPositions,
             recordingStartTime: recordingStartTime,
             initialZoomMode: initialZoomMode,
-            recordingMode: recordingMode
+            recordingMode: recordingMode,
+            cursorOverlayMode: cursorOverlayMode
         )
 
         // Don't set preferredContentSize - let window be freely resizable
